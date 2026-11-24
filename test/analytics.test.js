@@ -51,7 +51,7 @@ test('normalizeVideo keeps hidden likes as null', () => {
   delete raw.statistics.likeCount;
   const v = normalizeVideo(raw, NOW);
   assert.equal(v.likes, null);
-  assert.equal(v.engagementRate, 0.01); // comments only
+  assert.equal(v.engagementRate, null, 'comments-only rate is not comparable with likes+comments');
 });
 
 test('scoreOutliers uses a separate baseline per format', () => {

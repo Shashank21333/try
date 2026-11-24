@@ -160,7 +160,12 @@ function makeSortable(table, rows, renderRow) {
 }
 
 function toCsv(rows, cols) {
-  const cell = (v) => { const s = String(v ?? ''); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const cell = (v) => {
+    let s = String(v ?? '');
+    // Third-party titles could start with =, +, - or @ and run as spreadsheet formulas: prefix them with '.
+    if (typeof v === 'string' && /^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
   return [cols.map((c) => c.head).join(','), ...rows.map((r) => cols.map((c) => cell(c.get(r))).join(','))].join('\n');
 }
 function download(filename, text) {

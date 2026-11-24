@@ -146,9 +146,12 @@ export function channelReport(snaps) {
   };
 
   // Trending: views gained per day since the previous snapshot (>= 12h earlier), vs the channel's median gain.
+  // Needs a real 12h baseline (a partial one would extrapolate minutes of gains to a day), and only compares
+  // videos present in both snapshots: a new upload's lifetime views/day is not comparable with daily gains
+  // of older videos, and new uploads have their own list.
   const prevB = baseline(snaps, 12 * 3600_000);
   const trending = [];
-  if (prevB) {
+  if (prevB && !prevB.partial) {
     const prev = prevB.snap;
     const prevViews = new Map(prev.videos.map((v) => [v.id, v.views]));
     const dtDays = (latest.t - prev.t) / DAY;
@@ -159,7 +162,7 @@ export function channelReport(snaps) {
       return { ...v, gainPerDay: v.views / ageDays, isNew: true };
     });
     const typical = median(gains.filter((g) => !g.isNew).map((g) => g.gainPerDay));
-    for (const g of gains) {
+    for (const g of gains.filter((x) => !x.isNew)) {
       const ratio = g.gainPerDay / Math.max(typical, 1);
       if (g.gainPerDay >= 50 && ratio >= 2) trending.push({ ...g, ratio, typicalGainPerDay: typical });
     }

@@ -46,7 +46,7 @@ export async function compareChannels(client, inputs, { tz = 0, ...opts } = {}) 
   const errors = [];
   settled.forEach((r, i) => {
     if (r.status === 'fulfilled') loaded.push(r.value);
-    else errors.push({ input: list[i], message: r.reason?.message || String(r.reason) });
+    else errors.push({ input: list[i], message: r.reason?.message || String(r.reason), status: r.reason?.status });
   });
   // Outlier scores are already relative to each video's own channel, so they are comparable across channels.
   const all = loaded.flatMap((c) => c.videos);

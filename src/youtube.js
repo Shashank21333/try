@@ -143,6 +143,8 @@ export class YouTubeClient {
     const ids = (r.items || []).map((i) => i.id.videoId).filter(Boolean);
     // videos.list does not promise to return items in the requested order; restore search-rank order.
     const byId = new Map((await this.getVideos(ids)).map((v) => [v.id, v]));
-    return ids.map((id) => byId.get(id)).filter(Boolean);
+    // Keep each hit's 1-based search rank: a hit videos.list no longer returns (e.g. made private)
+    // must not move the ranks below it. Spread so the cached videos.list response is not mutated.
+    return ids.map((id, i) => { const v = byId.get(id); return v && { ...v, searchRank: i + 1 }; }).filter(Boolean);
   }
 }

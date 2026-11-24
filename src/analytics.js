@@ -57,9 +57,8 @@ export function normalizeVideo(item, now = Date.now()) {
     comments,
     ageDays,
     viewsPerDay: ageDays ? views / ageDays : null,
-    engagementRate: views > 0 && (likes !== null || comments !== null)
-      ? ((likes || 0) + (comments || 0)) / views
-      : null,
+    // (likes + comments) / views. When likes are hidden a comments-only rate is not comparable, so null.
+    engagementRate: views > 0 && likes !== null ? (likes + (comments || 0)) / views : null,
   };
 }
 

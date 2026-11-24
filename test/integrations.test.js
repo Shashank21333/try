@@ -183,7 +183,10 @@ test('channelReport computes deltas, trending videos and new uploads', () => {
   // views went from 500+29*10=790 to 500+30*500=15500 in one day; the other videos gained 10/day
   assert.equal(c.gainPerDay, 15500 - 790);
   assert.equal(c.ratio, (15500 - 790) / 10);
-  assert.ok(r.trending.some((v) => v.id === 'n' && v.isNew), 'new fast video flagged');
+  assert.ok(!r.trending.some((v) => v.id === 'n'), 'new uploads are listed in newUploads, not trending');
+  // A snapshot taken minutes after the previous one must not extrapolate into a fake breakout.
+  const quick = [...snaps, { ...snaps.at(-1), t: snaps.at(-1).t + 10 * 60_000, videos: snaps.at(-1).videos.map((v) => ({ ...v, views: v.views + 500 })) }];
+  assert.equal(channelReport(quick.slice(-2)).trending.length, 0, 'partial (<12h) baseline yields no trending');
   assert.ok(!r.trending.some((v) => v.id === 'a'));
   assert.deepEqual(r.newUploads.map((v) => v.id), ['n']);
   // single snapshot: no deltas, no trending

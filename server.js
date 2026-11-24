@@ -85,7 +85,10 @@ async function readJson(req) {
     if (size > 64 * 1024) throw httpError(413, 'Request too large');
     chunks.push(c);
   }
-  try { return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}; } catch { throw httpError(400, 'Invalid JSON'); }
+  let body;
+  try { body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}; } catch { throw httpError(400, 'Invalid JSON'); }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw httpError(400, 'Expected a JSON object.');
+  return body;
 }
 
 const meta = () => ({
