@@ -1,9 +1,9 @@
 // Feature: Rankings. Daily YouTube search rank tracking for (keyword, channel[, region]) pairs.
 // Logic lives in src/ranks.js; this file validates input and wires routes + the hourly job.
 //
-// Cost per check: one search.list call (top 50 results) + one videos.list call (1 unit) for details.
+// Cost per check: one search.list call (up to 50 results) + one videos.list call (1 unit) for details.
 // Checks are capped by RANK_MAX_CHECKS_PER_DAY (default 20) per rolling 24 hours, manual + automatic.
-// After every check the 'ranks' event is emitted on ctx.events (consumed by the Alerts feature).
+// After every conclusive check the 'ranks' event is emitted on ctx.events (consumed by the Alerts feature).
 import { RankTracker, KEYWORD_MAX, DEFAULT_MAX_CHECKS_PER_DAY, RECHECK_MIN_MS, isItemId, normalizeKeyword } from '../ranks.js';
 
 /** @param {object} ctx  see src/features/index.js. `opts.now` is for tests (fake clock). */
@@ -21,6 +21,13 @@ export function create(ctx, { now } = {}) {
 
   const withQuota = async (body) => ({ ...body, ...(await ranks.quota()) });
 
+  // readJson accepts any JSON value; `null`, arrays and numbers must be a 400, not a TypeError (500).
+  const readObject = async (req) => {
+    const body = await readJson(req);
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw httpError(400, 'Expected a JSON object.');
+    return body;
+  };
+
   const idFrom = (body) => {
     const id = body?.id;
     if (!isItemId(id)) throw httpError(400, 'Missing or invalid ranking id.');
@@ -34,7 +41,7 @@ export function create(ctx, { now } = {}) {
       'GET /api/ranks': async () => withQuota({ items: await ranks.reports(), autoChecks, meta: meta() }),
 
       'POST /api/ranks': async (url, req) => {
-        const body = await readJson(req);
+        const body = await readObject(req);
         const keyword = normalizeKeyword(body.keyword);
         if (!keyword) throw httpError(400, 'Enter a keyword to track.');
         if (keyword.length > KEYWORD_MAX) throw httpError(400, `Keywords can be at most ${KEYWORD_MAX} characters.`);
@@ -57,13 +64,13 @@ export function create(ctx, { now } = {}) {
       },
 
       'POST /api/ranks/remove': async (url, req) => {
-        const id = idFrom(await readJson(req));
+        const id = idFrom(await readObject(req));
         if (!(await ranks.remove(id))) throw httpError(404, 'That ranking is not being tracked.');
         return { ok: true };
       },
 
       'POST /api/ranks/check': async (url, req) => {
-        const body = await readJson(req);
+        const body = await readObject(req);
         if (body.id === undefined || body.id === null || body.id === '') {
           // Check everything that is due (last check older than ~20h).
           const run = await ranks.runDue();

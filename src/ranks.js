@@ -1,12 +1,18 @@
 // Daily YouTube search rank tracking: where does a channel's first video rank for a keyword?
 //
-// A check runs one YouTube search (search.list, top 50 results in relevance order) and records every
+// A check runs one YouTube search (search.list, up to 50 results in relevance order) and records every
 // position held by the tracked channel's videos. Checks are capped per rolling 24 hours because search
 // requests are the scarcest part of the YouTube API quota.
+//
+// YouTube may return fewer results than the 50 requested ("due to internal sorting or filtering even if
+// additional results are available", search.list docs). A check where the channel was not found among a
+// short page therefore does NOT prove "not in the top 50": it is stored as-is but treated as inconclusive
+// (see isConclusive) - it never counts as a drop and is skipped when computing changes and alerts.
 //
 // Store layout (JsonStore):
 //   'ranks'        [{ id, keyword, region|null, channelId, channelTitle, addedAt }]   (max MAX_ITEMS)
 //   'rank-<id>'    [{ t, position|null, positions, videoId|null, title|null, resultCount, top3 }]  (last MAX_HISTORY)
+//                  resultCount = how many search ranks the check covered (searchDepth), 0..SEARCH_DEPTH
 //   'ranks-quota'  [timestamps of checks in the last 24h]
 import { createHash } from 'node:crypto';
 
@@ -46,19 +52,53 @@ export function itemId(keyword, region, channelId) {
 export const isItemId = (id) => typeof id === 'string' && ID_RE.test(id);
 
 /**
- * Where does `channelId` appear in search results (raw video items, already in rank order)?
+ * 1-based search rank of the i-th returned item. The client may drop search hits it could not load
+ * details for (e.g. a video made private since YouTube indexed it); when it keeps each hit's original
+ * rank as `searchRank`, use it so a dropped hit does not move every result below it up one place.
+ */
+const rankOf = (v, i) => (Number.isInteger(v?.searchRank) && v.searchRank > 0 ? v.searchRank : i + 1);
+
+/** How many search ranks a check covered: the last rank seen (or the item count, whichever is larger). */
+export function searchDepth(results) {
+  return (results || []).reduce((depth, v, i) => Math.max(depth, rankOf(v, i)), 0);
+}
+
+/**
+ * Where does `channelId` appear in search results (raw video items, in rank order)?
  * Returns 1-based positions of all the channel's videos; `position` is the best (first) one.
  */
 export function findPositions(results, channelId) {
+  let first = null;
   const positions = [];
-  (results || []).forEach((v, i) => { if (v?.snippet?.channelId === channelId) positions.push(i + 1); });
-  const first = positions.length ? results[positions[0] - 1] : null;
+  (results || []).forEach((v, i) => {
+    if (v?.snippet?.channelId !== channelId) return;
+    positions.push(rankOf(v, i));
+    first ??= v;
+  });
   return {
     position: positions[0] ?? null,
     positions,
     videoId: first?.id ?? null,
     title: first?.snippet?.title ?? null,
   };
+}
+
+/**
+ * Did this check give a definite answer? A found position always does. "Not found" only proves
+ * "not in the top SEARCH_DEPTH" when YouTube returned a full page; with fewer results (or none,
+ * e.g. a failed or empty search) the channel may still rank further down, so the position is unknown.
+ * Entries without a resultCount (older data) are treated as full pages.
+ */
+export function isConclusive(entry) {
+  if (!entry) return false;
+  if (entry.position !== null && entry.position !== undefined) return true;
+  return !(Number.isFinite(entry.resultCount) && entry.resultCount < SEARCH_DEPTH);
+}
+
+/** Most recent conclusive check in `hist` (oldest -> newest) before index `before` that passes `ok`. */
+function lastConclusive(hist, before, ok = () => true) {
+  for (let i = before - 1; i >= 0; i--) if (isConclusive(hist[i]) && ok(hist[i])) return hist[i];
+  return null;
 }
 
 /** Who holds the top 3 spots (for context: "who outranks me?"). */
@@ -71,7 +111,8 @@ export function topResults(results, n = 3) {
 
 /**
  * Compare two checks. A LOWER position is better, so `places` = from - to: positive means the video
- * moved up. `dir`: 'up' | 'down' | 'same' | 'entered' (now in the top 50) | 'dropped' (fell out of it).
+ * moved up. `dir`: 'up' | 'down' | 'same' | 'entered' (now in the top 50) | 'dropped' (fell out of it)
+ * | 'unknown' (one side is an inconclusive "not found", see isConclusive, so no comparison is possible).
  */
 export function rankChange(prev, cur) {
   if (!prev || !cur) return null;
@@ -79,7 +120,8 @@ export function rankChange(prev, cur) {
   const to = cur.position ?? null;
   let places = null;
   let dir;
-  if (from === null && to === null) dir = 'same';
+  if (!isConclusive(prev) || !isConclusive(cur)) dir = 'unknown';
+  else if (from === null && to === null) dir = 'same';
   else if (from === null) dir = 'entered';
   else if (to === null) dir = 'dropped';
   else {
@@ -89,18 +131,17 @@ export function rankChange(prev, cur) {
   return { from, to, since: prev.t, places, dir };
 }
 
-/** Per-item report for the UI (pure; `history` is oldest -> newest). */
+/**
+ * Per-item report for the UI (pure; `history` is oldest -> newest). Changes compare the latest check
+ * with the most recent earlier check that gave a definite answer (inconclusive ones are skipped; the
+ * compared check's time is returned as `since`).
+ */
 export function rankReport(item, history, now = Date.now()) {
   const hist = Array.isArray(history) ? history : [];
   const latest = hist.at(-1) || null;
-  const previous = hist.length > 1 ? hist.at(-2) : null;
-  // Nearest check that is at least ~6.5 days older than the latest one.
-  let weekAgo = null;
-  if (latest) {
-    for (let i = hist.length - 2; i >= 0; i--) {
-      if (hist[i].t <= latest.t - WEEK_LOOKBACK_MS) { weekAgo = hist[i]; break; }
-    }
-  }
+  const previous = lastConclusive(hist, hist.length - 1);
+  // Nearest conclusive check that is at least ~6.5 days older than the latest one.
+  const weekAgo = latest ? lastConclusive(hist, hist.length - 1, (h) => h.t <= latest.t - WEEK_LOOKBACK_MS) : null;
   let best = null;
   for (const h of hist) {
     if (h.position !== null && h.position !== undefined && (!best || h.position < best.position)) best = { position: h.position, t: h.t };
@@ -126,7 +167,7 @@ export function rankReport(item, history, now = Date.now()) {
     best,
     firstChecked: hist[0]?.t ?? null,
     daysTracked: hist.length ? Math.max(0, Math.floor((now - hist[0].t) / DAY)) : 0,
-    series: hist.map((h) => ({ t: h.t, position: h.position ?? null })),
+    series: hist.map((h) => ({ t: h.t, position: h.position ?? null, resultCount: h.resultCount ?? null })),
   };
 }
 
@@ -145,7 +186,7 @@ export class RankTracker {
    * @param {object} o
    * @param {object} o.client  YouTubeClient or DemoClient
    * @param {object} o.store   JsonStore
-   * @param {import('node:events').EventEmitter} [o.events]  receives 'ranks' after every check
+   * @param {import('node:events').EventEmitter} [o.events]  receives 'ranks' after every conclusive check
    * @param {number} [o.maxChecksPerDay]  rolling-24h cap on checks (manual + automatic)
    */
   constructor({ client, store, events = null, maxChecksPerDay = DEFAULT_MAX_CHECKS_PER_DAY, now = () => Date.now(), log = () => {} }) {
@@ -232,29 +273,38 @@ export class RankTracker {
     return found;
   }
 
-  /** Run one check for `item` (spends one search from the daily budget). Returns the history entry. */
+  /**
+   * Run one check for `item` (spends one search from the daily budget). Returns the history entry.
+   * An empty or short result page is recorded too (so the daily job doesn't retry it every hour and
+   * burn search quota), but it is inconclusive: it never reads as a drop and emits no event.
+   */
   async check(item) {
     await this.reserveCheck();
     const results = await this.client.searchVideos(item.keyword, { max: SEARCH_DEPTH, regionCode: item.region || undefined });
     const entry = {
       t: this.now(),
       ...findPositions(results, item.channelId),
-      resultCount: results.length,
+      resultCount: Math.min(SEARCH_DEPTH, searchDepth(results)),
       top3: topResults(results),
     };
     // The item may have been removed while the search was running; don't resurrect its history file.
     if (!(await this.get(item.id))) return null;
     let previous = null;
     await this.store.update(historyKey(item.id), [], (list) => {
-      previous = list.at(-1) || null;
+      previous = lastConclusive(list, list.length);
       return [...list, entry].slice(-MAX_HISTORY);
     });
     this.#emit(item, previous, entry);
     return entry;
   }
 
+  /**
+   * 'ranks' event for the Alerts feature, only for conclusive checks. `previous` is the most recent
+   * earlier conclusive check ({ position: null, t: null } when there is none), so a short result page
+   * can never produce "dropped out of / entered the top 50".
+   */
   #emit(item, previous, entry) {
-    if (!this.events) return;
+    if (!this.events || !isConclusive(entry)) return;
     const payload = {
       itemId: item.id,
       keyword: item.keyword,
@@ -262,7 +312,7 @@ export class RankTracker {
       channelId: item.channelId,
       channelTitle: item.channelTitle,
       previous: { position: previous ? previous.position ?? null : null, t: previous ? previous.t : null },
-      current: { position: entry.position, videoId: entry.videoId, title: entry.title, t: entry.t },
+      current: { position: entry.position, videoId: entry.videoId, title: entry.title, t: entry.t, resultCount: entry.resultCount },
     };
     // A failing listener (e.g. an alert channel) must not fail the check itself.
     try { this.events.emit('ranks', payload); } catch (e) { this.log(`'ranks' listener failed: ${e.message}`); }

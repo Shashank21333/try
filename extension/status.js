@@ -19,7 +19,7 @@
     alerts: 'Alerts',
   };
 
-  const send = (msg) => chrome.runtime.sendMessage(msg).catch((e) => ({ ok: false, kind: 'extension', error: String(e.message || e) }));
+  const send = (msg) => chrome.runtime.sendMessage(msg).catch(L.messagingFailure);
 
   /** Message for a failed request, matching the panel's error states. */
   function describeFailure(res) {
@@ -36,12 +36,13 @@
 
   /**
    * Check /api/status (and whether /api/video exists) and render the result into `out`.
+   * `settings` ({ serverUrl, password }) tests those values instead of the saved ones.
    * Returns the /api/status response.
    */
-  async function checkConnection(out, { detailed = true } = {}) {
+  async function checkConnection(out, { detailed = true, settings } = {}) {
     out.className = 'status';
     out.replaceChildren(el('div', 'muted', 'Checking connection…'));
-    const res = await send({ type: 'api', method: 'GET', path: '/api/status' });
+    const res = await send({ type: 'api', method: 'GET', path: '/api/status', settings });
     out.replaceChildren();
     if (!res || !res.ok) {
       out.classList.add('bad');
@@ -72,7 +73,7 @@
       }
       if (ul.childElementCount) out.append(ul);
       // An unknown route answers 404 "Not found"; a missing id answers 400, so 400 means it exists.
-      const probe = await send({ type: 'api', method: 'GET', path: '/api/video' });
+      const probe = await send({ type: 'api', method: 'GET', path: '/api/video', settings });
       if (probe && probe.kind === 'missing') {
         out.append(el('div', 'banner', 'This server has no /api/video endpoint yet, so the video panel will not work. Update TubeScout (git pull) and restart it.'));
       }

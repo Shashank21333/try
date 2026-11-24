@@ -78,11 +78,15 @@ export const cleanKeyword = (k) => String(k ?? '').replace(/\s+/g, ' ').trim().s
 
 // Lowercase, accents kept, punctuation folded to spaces: "Budget-Phone!" -> "budget phone".
 const normText = (s) => String(s ?? '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{M}\p{N}]+/gu, ' ').trim();
-// Phrase match on a word boundary at the start, so "budget phone" also matches "budget phones".
-const hasPhrase = (text, kw) => Boolean(kw) && ` ${normText(text)} `.includes(` ${kw}`);
+// Scripts written without spaces between words: a word boundary cannot be found there.
+const NO_SPACES_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u;
+// Match on a word boundary at the start, so "budget phone" also matches "budget phones";
+// plain substring match for Japanese, Chinese, Thai etc. ("格安スマホ" in "最強の格安スマホ").
+const contains = (normalized, kw) => (NO_SPACES_RE.test(kw) ? normalized.includes(kw) : ` ${normalized} `.includes(` ${kw}`));
+const hasPhrase = (text, kw) => Boolean(kw) && contains(normText(text), kw);
 const hasAllWords = (text, kw) => {
-  const t = ` ${normText(text)} `;
-  return Boolean(kw) && kw.split(' ').every((w) => t.includes(` ${w}`));
+  const t = normText(text);
+  return Boolean(kw) && kw.split(' ').every((w) => contains(t, w));
 };
 
 // ---------------------------------------------------------------- description parsing
@@ -103,25 +107,61 @@ const TS_START = new RegExp(String.raw`^[\s\p{P}\p{S}]*?(${TS})(?![\d:])[\s\p{P}
 // "Intro - 0:00", "Intro (0:00)"
 const TS_END = new RegExp(String.raw`^(.*?[\p{L}\p{N}].*?)[\s\p{P}\p{S}]+(${TS})[\s\p{P}]*$`, 'u');
 
+/** One description line as { start, title, style } when it is a timestamp line, else null. */
+function timestampLine(line) {
+  let m = TS_START.exec(line);
+  const start = m ? parseTimestamp(m[1]) : null;
+  if (start !== null) return { start, title: m[2].trim(), style: 'start' };
+  m = TS_END.exec(line);
+  const end = m ? parseTimestamp(m[2]) : null;
+  return end === null ? null : { start: end, title: m[1].trim(), style: 'end' };
+}
+
+/**
+ * The chapter list in a description: YouTube asks for "a list of timestamps and titles", so a
+ * stray time elsewhere (a schedule "every Friday at 18:00", a track length "Lofi beat - 2:45")
+ * must not be read as a chapter. Lines are grouped into blocks of adjacent timestamp lines in the
+ * same format (time first or time last). The list is the first block with a 0:00 entry or, failing
+ * that, the first time-first block that has 2+ entries (a list that forgot 0:00). Later blocks in
+ * the same format are added while they continue the ascending order inside the video, which covers
+ * lists split by blank lines or section headings. Time-last lines without 0:00 are never treated
+ * as a list: they cannot be told apart from credits and track lengths.
+ */
+function findChapterList(lines, durationSec) {
+  const blocks = [];
+  let cur = null;
+  for (const line of lines) {
+    const e = timestampLine(line);
+    if (e && cur?.style === e.style) cur.entries.push(e);
+    else if (e) blocks.push(cur = { style: e.style, entries: [e] });
+    else cur = null; // a blank or text line ends the block
+  }
+  const extend = (i) => {
+    const list = [...blocks[i].entries];
+    for (const b of blocks.slice(i + 1)) {
+      if (b.style !== blocks[i].style) continue;
+      const first = b.entries[0].start;
+      if (first <= list.at(-1).start || (durationSec > 0 && first >= durationSec)) break;
+      list.push(...b.entries);
+    }
+    return list;
+  };
+  let i = blocks.findIndex((b) => b.entries.some((e) => e.start === 0));
+  if (i < 0) i = blocks.findIndex((b, j) => b.style === 'start' && extend(j).length >= 2);
+  const total = blocks.reduce((s, b) => s + b.entries.length, 0);
+  const chapters = i < 0 ? [] : extend(i);
+  return { chapters, ignored: total - chapters.length };
+}
+
 /**
  * Chapter timestamps in a description, validated against YouTube's documented rules
  * (first at 0:00, at least 3, ascending, each chapter >= 10 s; the last chapter is
- * checked against the video length when known).
- * Returns { found, valid, count, chapters: [{ start, title }], problems: [string] }.
+ * checked against the video length when known). Only the chapter list itself is checked
+ * (see findChapterList); `ignored` counts other timestamp lines that were left out.
+ * Returns { found, valid, count, chapters: [{ start, title }], problems: [string], ignored }.
  */
 export function parseChapters(description, durationSec = 0) {
-  const chapters = [];
-  for (const line of String(description ?? '').split(/\r?\n/)) {
-    let m = TS_START.exec(line);
-    let start = m ? parseTimestamp(m[1]) : null;
-    let title = m ? m[2] : '';
-    if (start === null) {
-      m = TS_END.exec(line);
-      start = m ? parseTimestamp(m[2]) : null;
-      title = m ? m[1] : '';
-    }
-    if (start !== null) chapters.push({ start, title: title.trim() });
-  }
+  const { chapters, ignored } = findChapterList(String(description ?? '').split(/\r?\n/), durationSec);
   const problems = [];
   if (chapters.length) {
     if (chapters.length < CHAPTER_MIN_COUNT) {
@@ -144,7 +184,8 @@ export function parseChapters(description, durationSec = 0) {
       }
     }
   }
-  return { found: chapters.length > 0, valid: chapters.length > 0 && !problems.length, count: chapters.length, chapters, problems };
+  const chapterList = chapters.map(({ start, title }) => ({ start, title }));
+  return { found: chapters.length > 0, valid: chapters.length > 0 && !problems.length, count: chapters.length, chapters: chapterList, problems, ignored };
 }
 
 /** Distinct hashtags (lowercased) in a text. Must contain a letter; "C#" and URL #fragments are not hashtags. */
@@ -167,12 +208,21 @@ const LINK_RE = /\bhttps?:\/\/\S+|\bwww\.[a-z\d-]+\.[a-z]/i;
 // English call-to-action phrases only (heuristic).
 const CTA_RE = /\b(subscribe|comment|let me know|check out|watch (?:next|this|the full|more)|click|join|follow|sign up|download|learn more|visit|link(?:s)? (?:in|below)|shop|support (?:the|this|me|us)|patreon)\b/i;
 
-/** True when a title "shouts": mostly upper-case letters, or 3+ ALL-CAPS words. */
+// An ALL-CAPS word long enough not to be a typical acronym (GPU, NASA, FAA are 3-4 letters).
+export const SHOUT_WORD_MIN = 5;
+const SHOUT_WORD_RE = new RegExp(String.raw`(?<![\p{L}\p{N}])\p{Lu}{${SHOUT_WORD_MIN},}(?![\p{L}\p{N}])`, 'gu');
+
+/**
+ * True when a title "shouts": mostly upper-case letters, or 2+ different ALL-CAPS words of
+ * SHOUT_WORD_MIN+ letters. Shorter capitalised words are ignored because they are usually
+ * acronyms ("AMD vs NVIDIA: Best GPU" is not shouting).
+ */
 export function isShouty(title) {
-  const letters = [...String(title ?? '')].filter((c) => /\p{L}/u.test(c) && c.toLowerCase() !== c.toUpperCase());
+  const t = String(title ?? '');
+  const letters = [...t].filter((c) => /\p{L}/u.test(c) && c.toLowerCase() !== c.toUpperCase());
   const upper = letters.filter((c) => c === c.toUpperCase()).length;
   if (letters.length >= 8 && upper / letters.length >= 0.6) return true;
-  return (String(title ?? '').match(/\b\p{Lu}{3,}\b/gu) || []).length >= 3;
+  return new Set(t.match(SHOUT_WORD_RE) || []).size >= 2;
 }
 
 // ---------------------------------------------------------------- video score
@@ -286,7 +336,7 @@ export function scoreVideo(item, { keyword = '', context = null } = {}) {
     if (!ch.found) {
       add({
         id: 'chapters', label: 'Chapters', kind: 'heuristic', maxPoints: 10, points: 0,
-        detail: 'No timestamps in the description. Chapters split a long video into labelled sections viewers can jump to. (Automatic chapters, if YouTube added any, are not visible through the API.)',
+        detail: `No list of chapter timestamps in the description.${ch.ignored ? ' (Lone times elsewhere in it, such as a schedule or a track length, are not counted as chapters.)' : ''} Chapters split a long video into labelled sections viewers can jump to. (Automatic chapters, if YouTube added any, are not visible through the API.)`,
         fix: `Add a list of timestamps to the description: start with 0:00, use at least ${CHAPTER_MIN_COUNT} in ascending order, and make each chapter at least ${CHAPTER_MIN_SECONDS} seconds long.`,
       });
     } else {
@@ -347,7 +397,7 @@ export function scoreVideo(item, { keyword = '', context = null } = {}) {
   if (isShort) {
     add({
       id: 'links-cta', label: 'Call to action', kind: 'heuristic', maxPoints: 2, points: hasCta ? 2 : 0,
-      detail: `${hasCta ? 'The description asks viewers to act.' : 'No call to action found (English phrases like "subscribe" or "check out" are detected).'}${hasLink ? ' Links in Shorts descriptions are not clickable, so they will not get clicks.' : ''}`,
+      detail: `${hasCta ? 'The description asks viewers to act.' : 'No call to action found (English phrases like "subscribe" or "check out" are detected).'}${hasLink ? ' This video is treated as a Short because it is 3 minutes or less (the API has no Shorts flag). If it is a Short, links in its description are not clickable.' : ''}`,
       fix: 'Ask viewers to do one thing, such as watch the related long-form video or subscribe.',
     });
   } else {
@@ -393,13 +443,20 @@ export function scoreVideo(item, { keyword = '', context = null } = {}) {
     });
   }
 
-  // Engagement vs the channel's typical upload of the same format (heuristic)
+  // Engagement vs the channel's typical upload of the same format (heuristic). The baseline is
+  // (likes + comments) / views, so a video whose like count is hidden cannot be compared with it.
+  // Disabled comments count as 0: the video really gets none.
   const views = Number(st.viewCount);
   const likes = st.likeCount === undefined ? null : Number(st.likeCount);
-  const comments = st.commentCount === undefined ? null : Number(st.commentCount);
-  const er = views > 0 && (likes !== null || comments !== null) ? ((likes || 0) + (comments || 0)) / views : null;
+  const comments = st.commentCount === undefined ? 0 : Number(st.commentCount);
+  const er = views > 0 && likes !== null ? (likes + comments) / views : null;
   const base = context?.medianEngagement;
-  if (er !== null && Number.isFinite(base) && base > 0) {
+  if (views > 0 && likes === null && Number.isFinite(base) && base > 0) {
+    add({
+      id: 'engagement', label: 'Engagement vs channel', kind: 'heuristic', maxPoints: 0, points: 0, info: true,
+      detail: 'The like count is hidden, so engagement cannot be compared with the channel\'s other uploads.',
+    });
+  } else if (er !== null && Number.isFinite(base) && base > 0) {
     const ratio = er / base;
     add({
       id: 'engagement', label: 'Engagement vs channel', kind: 'heuristic', maxPoints: 8,
@@ -416,7 +473,15 @@ export function scoreVideo(item, { keyword = '', context = null } = {}) {
 export const failedChecks = (checks) => checks.filter((c) => !c.passed)
   .sort((a, b) => (b.maxPoints - b.points) - (a.maxPoints - a.points));
 
-/** Median views and engagement per format, used as the "typical upload" baseline. */
+/** (likes + comments) / views of normalized videos whose like count is public. */
+const engagementRates = (videos) => videos
+  .filter((v) => v.likes !== null && Number.isFinite(v.engagementRate)).map((v) => v.engagementRate);
+
+/**
+ * Median views and engagement per format, used as the "typical upload" baseline.
+ * Videos with a hidden like count are left out of the engagement median (their rate would be
+ * comments only and pull the baseline down).
+ */
 export function formatBaselines(videos) {
   const out = {};
   for (const [key, isShort] of [['short', true], ['long', false]]) {
@@ -424,7 +489,7 @@ export function formatBaselines(videos) {
     out[key] = {
       count: list.length,
       medianViews: median(list.map((v) => v.views)),
-      medianEngagement: median(list.map((v) => v.engagementRate).filter((x) => x !== null)),
+      medianEngagement: median(engagementRates(list)),
     };
   }
   return out;
@@ -586,7 +651,7 @@ export function auditChannel(rawChannel, rawVideos, { now = Date.now(), complete
     packaging.push(makeCheck({
       id: 'all-caps', label: 'ALL-CAPS overuse', kind: 'heuristic', maxPoints: 6,
       points: sShare <= 0.2 ? 6 : sShare <= 0.4 ? 3 : 0,
-      detail: `${pctStr(sShare)} of titles are mostly capitals or have 3+ ALL-CAPS words (rule of thumb: 20% or less; one emphasized word is fine).`,
+      detail: `${pctStr(sShare)} of titles are mostly capitals or have 2+ ALL-CAPS words of ${SHOUT_WORD_MIN}+ letters (rule of thumb: 20% or less; one emphasized word is fine, and shorter words are skipped as likely acronyms such as GPU or NASA).`,
       fix: `Tone down capitals in ${shouty.length} title${shouty.length === 1 ? '' : 's'}, such as ${topTitles(shouty)}. Emphasize one word at most.`,
     }));
     if (long.length) {
@@ -613,8 +678,10 @@ export function auditChannel(rawChannel, rawVideos, { now = Date.now(), complete
         fix: `Recent uploads reach only ${pctStr(vps, 1)} of your subscriber count. Study your outlier videos below and make more on those topics.`,
       }));
     }
-    const eng = channel.avgEngagement;
-    if (Number.isFinite(eng) && eng > 0) {
+    // Not channel.avgEngagement: that also averages comments-only rates of videos with hidden likes.
+    const rates = engagementRates(scored);
+    const eng = mean(rates);
+    if (rates.length && eng > 0) {
       performance.push(makeCheck({
         id: 'engagement', label: 'Engagement rate', kind: 'heuristic', maxPoints: 6,
         points: eng >= 0.04 ? 6 : eng >= 0.02 ? 3 : 0,

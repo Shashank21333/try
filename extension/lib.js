@@ -259,6 +259,20 @@
     return `YouTube suggests it after typing “${ac.prefix}” (${ac.prefixLength} of ${ac.keywordLength} characters)${pos}. The earlier it appears, the more people search it.`;
   }
 
+  /**
+   * A rejected chrome.runtime.sendMessage, as the same { ok: false, kind } shape the worker returns.
+   * Chrome stops an extension service worker whose network request gets no response for 30s; the
+   * pending reply then fails with Chromium's "...message channel closed before a response was
+   * received" (or "The message port closed..."), which means the server was too slow.
+   */
+  function messagingFailure(e) {
+    const msg = String((e && e.message) || e || '');
+    if (/message (channel|port) closed/i.test(msg)) {
+      return { ok: false, kind: 'timeout', error: 'Your TubeScout server took too long to answer, so Chrome stopped the request.' };
+    }
+    return { ok: false, kind: 'extension', error: msg || 'No answer from the extension.' };
+  }
+
   const api = {
     DEFAULT_SERVER,
     ALLOWED_REQUESTS,
@@ -283,6 +297,7 @@
     formatAge,
     topFailedChecks,
     strengthExplanation,
+    messagingFailure,
   };
 
   root.TubeScoutLib = Object.freeze(api);

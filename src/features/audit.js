@@ -3,7 +3,9 @@
 //
 // Quota (YouTube Data API units, cached 15 min by the client):
 //   /api/video          videos.list + channels.list + playlistItems.list + videos.list = ~4
-//   /api/audit/channel  ~2 per 50 uploads + 1 for the channel (+1 for an @handle, +100 for a name search)
+//   /api/audit/channel  ~2 per 50 uploads + 1 for the channel (+1 for an @handle). A plain name is
+//                       resolved with search.list, which costs no units but 1 of the separate
+//                       "Search Queries" bucket (about 100 calls a day by default).
 import { normalizeVideo, scoreOutliers, channelSummary } from '../analytics.js';
 import { scoreVideo, parseVideoId, cleanKeyword, auditChannel, formatBaselines } from '../seo.js';
 
@@ -56,7 +58,9 @@ export function create(ctx) {
             isShort: v.isShort,
             ageDays: v.ageDays,
             viewsPerDay: v.viewsPerDay,
-            engagementRate: v.engagementRate,
+            // (likes + comments) / views; null when the like count is hidden (a comments-only rate
+            // would not be comparable with other videos).
+            engagementRate: v.likes === null ? null : v.engagementRate,
             tags: v.tags,
             thumbnail: v.thumbnail,
             description: item.snippet?.description || '',

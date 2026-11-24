@@ -103,6 +103,12 @@ function checklist(checks) {
 }
 
 const demoNote = () => (T.state.meta?.mode === 'demo' ? ' · <b>synthetic demo data</b>' : '');
+// The YouTube API does not say whether a video is a Short; TubeScout infers it from length.
+const FORMAT_NOTE = 'Format is inferred from length: the YouTube API does not mark Shorts, so videos of 3 minutes or less are treated as Shorts.';
+
+// Spreadsheet apps run cells that start with = + - @ (or a tab/CR) as formulas, and video titles
+// come from any channel: prefix such cells with ' so they stay text (OWASP "CSV injection").
+const csvText = (s) => (/^[=+\-@\t\r]/.test(String(s ?? '')) ? `'${s}` : String(s ?? ''));
 
 // ---------- video audit ----------
 function renderVideo(d, keyword) {
@@ -114,21 +120,22 @@ function renderVideo(d, keyword) {
       <div class="ac-head-text">
         <h2><a href="${ytVideo(v.id)}" target="_blank" rel="noopener">${esc(v.title)}</a></h2>
         <div class="meta">${v.channelId ? `<a href="${ytChannel(v.channelId)}" target="_blank" rel="noopener">${esc(v.channelTitle)}</a>` : esc(v.channelTitle)}
-          · ${ago(v.ageDays)} · ${v.isShort ? `Short (${dur(v.durationSec)})` : dur(v.durationSec)}${demoNote()}</div>
+          · ${ago(v.ageDays)} · ${dur(v.durationSec)}${v.isShort ? ' · treated as a Short (3 min or less)' : ''}${demoNote()}</div>
         ${keyword ? `<div class="meta">Target keyword: <b>${esc(keyword)}</b></div>` : '<div class="meta">Add a target keyword to also check keyword placement.</div>'}
         ${v.channelId ? `<div class="ac-row-actions"><button type="button" class="ghost" data-audit-channel="${esc(v.channelId)}">Audit this channel</button></div>` : ''}
       </div></div>`;
   const score = `<div class="ac-score">${ring(s.score, s.grade, 'Video SEO score')}<div class="kpis">
       ${kpi('Views', n(v.views))}
       ${kpi('Views / day', n(v.viewsPerDay))}
-      ${kpi('Engagement', pct(v.engagementRate, 2), '(likes + comments) ÷ views')}
+      ${kpi('Engagement', pct(v.engagementRate, 2), v.likes === null ? 'not comparable: like count hidden' : '(likes + comments) ÷ views')}
       ${kpi('Outlier score', fx(d.outlierScore), base ? `vs ${n(base)} typical ${fmt} views` : 'no channel baseline')}
       ${kpi('Likes', n(v.likes), v.likes === null ? 'hidden' : '')}
       ${kpi('Comments', n(v.comments), v.comments === null ? 'disabled' : '')}
     </div></div>
     <p class="hint">SEO score = share of available points earned on the checks below (A ≥ 85, B ≥ 70, C ≥ 55, D ≥ 40, else F).
       "Official rule" checks follow YouTube's documented requirements; "Heuristic" checks are rules of thumb.
-      Outlier score = views ÷ the channel's median views for its ${c ? c.sampleSize : 'recent'} most recent uploads of the same format.</p>`;
+      Outlier score = views ÷ the channel's median views for its ${c ? c.sampleSize : 'recent'} most recent uploads of the same format.
+      ${FORMAT_NOTE}</p>`;
   const tags = v.tags.length
     ? v.tags.map((t) => `<span class="tag">${esc(t)}</span>`).join('')
     : '<p class="muted">This video has no public tags.</p>';
@@ -141,7 +148,7 @@ function renderVideo(d, keyword) {
 
 // ---------- channel audit ----------
 const VIDEO_CSV = [
-  { head: 'title', get: (v) => v.title }, { head: 'url', get: (v) => ytVideo(v.id) },
+  { head: 'title', get: (v) => csvText(v.title) }, { head: 'url', get: (v) => ytVideo(v.id) },
   { head: 'published', get: (v) => v.publishedAt }, { head: 'format', get: (v) => (v.isShort ? 'short' : 'long') },
   { head: 'views', get: (v) => v.views }, { head: 'outlier_score', get: (v) => v.outlierScore?.toFixed(3) },
   { head: 'seo_score', get: (v) => v.seoScore }, { head: 'grade', get: (v) => v.grade },
@@ -167,7 +174,7 @@ function renderChannel(d) {
       <div class="track"><div style="width:${s.score === null ? 0 : clampScore(s.score)}%"></div></div>
       <div class="note">${Number(s.weight) || 0}% of overall score</div></div>`).join('')}</div>`;
   const overview = `<div class="ac-score">${ring(d.score, d.grade, 'Channel audit score')}${gauges}</div>
-    <p class="hint">Overall score = weighted average of the section scores. Thresholds are TubeScout's rules of thumb, except checks marked "Official rule". Based on public data only: impressions, click-through rate and watch time need YouTube Studio (see the My channel tab for your own channel).</p>`;
+    <p class="hint">Overall score = weighted average of the section scores. Thresholds are TubeScout's rules of thumb, except checks marked "Official rule". Based on public data only: impressions, click-through rate and watch time need YouTube Studio (see the My channel tab for your own channel). ${FORMAT_NOTE}</p>`;
 
   const recs = d.recommendations.length
     ? `<ol class="ac-recs">${d.recommendations.map((r) => `<li>${esc(r)}</li>`).join('')}</ol>`
@@ -213,7 +220,7 @@ root.innerHTML = `
         <select id="ac-max" aria-label="Uploads to audit"><option value="50">Last 50 uploads</option><option value="100">Last 100</option><option value="200">Last 200</option></select>
         <button type="submit" class="primary">Audit channel</button>
       </div>
-      <p class="hint">About 2 API units per 50 uploads, plus 1–2 for the channel (100 more if it has to be found by name search).</p>
+      <p class="hint">About 2 API units per 50 uploads, plus 1–2 for the channel. If it has to be found by name, that also takes 1 of the ~100 daily search calls (a separate quota).</p>
     </form>
   </div>
   <div id="ac-out"></div>`;

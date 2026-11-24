@@ -44,6 +44,7 @@
     collapsed: false,
     loadedKey: '', // which page key the body currently shows data for
     keyword: '', // optional target keyword for the video SEO score
+    autoMin: null, // floating video panel collapsed so it doesn't cover the player (null = not decided yet)
   };
   const cache = new Map();
   let statusCache = null;
@@ -124,9 +125,9 @@
     try {
       res = await send({ type: 'api', method, path, body });
     } catch (e) {
-      res = { ok: false, kind: 'extension', error: String((e && e.message) || e) };
+      res = L.messagingFailure(e); // a worker Chrome stopped mid-request reads as a timeout
     }
-    if (!res || typeof res !== 'object') res = { ok: false, kind: 'extension', error: 'No answer from the extension.' };
+    if (!res || typeof res !== 'object') res = L.messagingFailure(null);
     if (cacheable && res.ok) cache.set(path, { t: Date.now(), res });
     return res;
   }
@@ -139,21 +140,60 @@
     return res;
   }
 
-  // ---------- layout: inline in the watch sidebar when possible, else floating ----------
+  // ---------- layout: inline on watch pages when possible, else floating ----------
 
-  function inlineTarget() {
+  const isShown = (el, minWidth) => Boolean(el && el.getClientRects().length && el.getBoundingClientRect().width >= minWidth);
+
+  /**
+   * Where the panel sits inline on a watch page, as { parent, after? }, or null to float.
+   * Two-column layout: top of the sidebar. One-column layout (narrow window, no sidebar):
+   * under the video's title and description, so it never covers the player.
+   * These are YouTube's own (undocumented) element ids; if they change, the panel floats.
+   */
+  function inlineSlot() {
     if (state.page.type !== 'video' || state.page.isShort) return null;
-    const el = document.querySelector('ytd-watch-flexy #secondary-inner') || document.querySelector('#secondary-inner');
-    if (!el || !el.getClientRects().length || el.getBoundingClientRect().width < 280) return null; // hidden or one-column layout
-    return el;
+    const side = document.querySelector('ytd-watch-flexy #secondary-inner') || document.querySelector('#secondary-inner');
+    if (isShown(side, 280)) return { parent: side };
+    const below = document.querySelector('ytd-watch-flexy #below');
+    if (!isShown(below, 200)) return null;
+    const info = below.querySelector(':scope > ytd-watch-metadata');
+    return info ? { parent: below, after: info } : { parent: below };
   }
 
   function place() {
     if (!state.page.type) { host.remove(); return; }
-    const target = inlineTarget();
-    host.toggleAttribute('data-floating', !target);
-    const parent = target || document.body;
-    if (parent && host.parentNode !== parent) parent.prepend(host);
+    const slot = inlineSlot();
+    host.toggleAttribute('data-floating', !slot);
+    host.toggleAttribute('data-below', Boolean(slot && slot.parent.id === 'below'));
+    if (!slot) {
+      if (document.body && host.parentNode !== document.body) document.body.prepend(host);
+      if (state.page.type === 'video') autoMinimize();
+    } else if (slot.after) {
+      if (host.previousElementSibling !== slot.after) slot.after.after(host);
+    } else if (host.parentNode !== slot.parent) {
+      slot.parent.prepend(host);
+    }
+  }
+
+  /** The video player's box if one is visible in the viewport (Shorts or watch page). */
+  function visiblePlayer() {
+    for (const el of document.querySelectorAll('#shorts-player, #movie_player, video')) {
+      const r = el.getBoundingClientRect();
+      if (r.width >= 100 && r.height >= 100 && r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth) return r;
+    }
+    return null;
+  }
+
+  // A floating video panel (Shorts, or a watch layout we don't recognize) must not hide the
+  // video: if it would cover the player, it starts collapsed on this page. Unlike the
+  // collapse button this is not saved, so channel and search panels stay open.
+  function autoMinimize() {
+    if (state.autoMin !== null) return; // already decided for this page, or the user toggled
+    const player = visiblePlayer();
+    if (!player) return; // not rendered yet: the next poll checks again
+    const box = host.getBoundingClientRect(); // the panel grows down to the viewport bottom at most
+    state.autoMin = player.left < box.right && player.right > box.left && player.bottom > box.top;
+    if (state.autoMin) render();
   }
 
   function syncTheme() {
@@ -164,19 +204,22 @@
 
   const TYPE_LABEL = { video: 'Video', channel: 'Channel', search: 'Keyword' };
 
+  const isCollapsed = () => state.collapsed || state.autoMin === true;
+
   function header() {
+    const collapsed = isCollapsed();
     const toggle = h('button', {
       class: 'icon-btn toggle', type: 'button',
-      'aria-expanded': String(!state.collapsed),
-      'aria-label': state.collapsed ? 'Expand TubeScout panel' : 'Collapse TubeScout panel',
-      title: state.collapsed ? 'Expand' : 'Collapse',
-      onclick: (e) => { e.stopPropagation(); setCollapsed(!state.collapsed); },
+      'aria-expanded': String(!collapsed),
+      'aria-label': collapsed ? 'Expand TubeScout panel' : 'Collapse TubeScout panel',
+      title: collapsed ? 'Expand' : 'Collapse',
+      onclick: (e) => { e.stopPropagation(); setCollapsed(!collapsed); },
     }, icon('chevron'));
     const settings = h('button', {
       class: 'icon-btn', type: 'button', 'aria-label': 'TubeScout settings', title: 'Settings',
       onclick: (e) => { e.stopPropagation(); openOptions(); },
     }, icon('settings'));
-    return h('header', { class: 'head', onclick: () => setCollapsed(!state.collapsed) },
+    return h('header', { class: 'head', onclick: () => setCollapsed(!isCollapsed()) },
       h('span', { class: 'logo', 'aria-hidden': 'true', text: 'TS' }),
       h('span', { class: 'brand', text: 'TubeScout' }),
       h('span', { class: 'kind', text: TYPE_LABEL[state.page.type] || '' }),
@@ -190,16 +233,19 @@
   }
 
   function setCollapsed(c) {
-    state.collapsed = c;
-    send({ type: 'setPrefs', collapsed: c }).catch(() => {});
+    state.autoMin = false; // the user decided for this page
+    if (c !== state.collapsed) {
+      state.collapsed = c; // saved: applies to every page
+      send({ type: 'setPrefs', collapsed: c }).catch(() => {});
+    }
     render();
   }
 
   /** Re-render the frame; load data for the current page if the body is open and not loaded yet. */
   function render(body) {
     panel.replaceChildren(header());
-    panel.classList.toggle('collapsed', state.collapsed);
-    if (state.collapsed) return; // collapsed panels don't fetch anything (saves API quota)
+    panel.classList.toggle('collapsed', isCollapsed());
+    if (isCollapsed()) return; // collapsed panels don't fetch anything (saves API quota)
     if (body) { panel.append(h('div', { class: 'body' }, body)); return; }
     if (state.loadedKey === state.key && state.lastBody) { panel.append(h('div', { class: 'body' }, state.lastBody)); return; }
     load();
@@ -369,7 +415,8 @@
       section(`Tags (${tags.length})`, tagBlock),
       h('div', { class: 'actions' },
         trackButton(v.channelId),
-        extLink('Full audit', L.dashboardUrl(server, { tab: 'audit', video: page.videoId })),
+        // Same target keyword as this panel, so the Audit tab shows the same score.
+        extLink('Full audit', L.dashboardUrl(server, { tab: 'audit', video: page.videoId, keyword: state.keyword })),
         extLink('Open dashboard', L.dashboardUrl(server), 'btn ghost')),
       footer(res, isDemo ? 'Synthetic demo data' : 'YouTube Data API (a few quota units)'));
   }
@@ -512,6 +559,7 @@
     state.loadedKey = '';
     state.keyword = '';
     state.demandConfirmed = false;
+    state.autoMin = null;
     if (!page.type) { host.remove(); return; }
     place();
     render();
@@ -553,8 +601,9 @@
   --accent: #ff5c61; --good: #3ecf7a; --bad: #ff6b61; --warn-bg: #3a2f10; --warn-ink: #ffd98a; --shadow: 0 4px 18px rgba(0,0,0,.5); color-scheme: dark; }
 :host([data-floating]) { position: fixed; top: 68px; right: 16px; z-index: 2019; margin: 0;
   width: min(360px, calc(100vw - 32px)); }
+:host([data-below]) { margin: 12px 0; }
 * { box-sizing: border-box; }
-.panel { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+.panel { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; container-type: inline-size; }
 :host([data-floating]) .panel { box-shadow: var(--shadow); max-height: calc(100vh - 84px); display: flex; flex-direction: column; }
 :host([data-floating]) .body { overflow-y: auto; overscroll-behavior: contain; }
 .head { display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 12px; cursor: pointer; user-select: none; border-bottom: 1px solid var(--border); }
@@ -572,6 +621,7 @@
 .body { padding: 10px 12px 12px; }
 .title-line { font-weight: 600; font-size: 13px; margin: 0 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .kpis { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+@container (min-width: 600px) { .kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 .kpi { background: var(--bg-2); border-radius: 8px; padding: 7px 9px; min-width: 0; }
 .k-label { font-size: 11px; color: var(--muted); }
 .k-value { font-size: 18px; font-weight: 700; line-height: 1.2; font-variant-numeric: tabular-nums; }

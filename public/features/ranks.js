@@ -15,6 +15,9 @@ const STYLE = `
 tr.rk-sel td { background: color-mix(in srgb, var(--bar) 9%, transparent); }
 .rk-actions { display: inline-flex; gap: 6px; }
 .rk-kw { font-weight: 600; }
+/* Let long keywords wrap in a capped column so Position stays on screen at phone width (td is nowrap). */
+#out-ranks td.l .rk-kw { display: inline-block; min-width: 8rem; max-width: 14rem; white-space: normal; overflow-wrap: anywhere; }
+.rk-chart text.rk-unk { fill: var(--muted); font-size: 13px; font-weight: 700; }
 .rk-chart { width: 100%; min-height: 200px; }
 .rk-chart svg { display: block; width: 100%; height: auto; overflow: visible; }
 .rk-chart text { font-size: 11px; fill: var(--muted); font-variant-numeric: tabular-nums; }
@@ -43,15 +46,37 @@ const agoT = (t) => { const ms = Date.now() - t; return ms < 3_600_000 ? (ms < 6
 const fullDate = (t) => new Date(t).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 const hashPos = (p) => `#${p}`;
 
+// A check asks YouTube for the top 50 results, but search.list may return fewer. "Not found" only means
+// "not in the top 50" when a full page came back (same rule as isConclusive in src/ranks.js); otherwise
+// the position is unknown. resultCount null = older data without a count, treated as a full page.
+const DEPTH = 50;
+const conclusiveMiss = (n) => !Number.isFinite(n) || n >= DEPTH;
+/** Short table/chart label for a check where the channel was not found. */
+const missLabel = (n) => (conclusiveMiss(n) ? 'not in top 50' : n === 0 ? 'no results' : `not in ${n} results`);
+/** Sentence for a check where `who` was not found. */
+const missSentence = (who, n) => (conclusiveMiss(n)
+  ? `${who} is not in the top 50 results`
+  : n === 0 ? `YouTube returned no results, so the position of ${who} is unknown`
+    : `${who} is not among the ${n} results YouTube returned, so its position is unknown`);
+/** Why an inconclusive check is not treated as "not in top 50" ('' for a conclusive one). */
+const missWhy = (n) => (conclusiveMiss(n) ? ''
+  : n === 0 ? 'YouTube returned no results for this search, so the position could not be measured. The next daily check tries again.'
+    : `YouTube can return fewer than the 50 results requested; this time it returned ${n}. The channel may still rank lower in the top 50. This check is skipped when computing changes and does not trigger ranking alerts.`);
+
 // ---------------------------------------------------------------- cells
 
-/** Rank change cell. `places` > 0 means the video moved UP (a lower number is better). */
-function changeCell(ch, emptyTip) {
+/**
+ * Rank change cell. `places` > 0 means the video moved UP (a lower number is better).
+ * The server compares the latest check with the last earlier check that gave a definite answer,
+ * so `from` null always means "not in top 50"; `to` is the latest check (`latestCount` results).
+ */
+function changeCell(ch, emptyTip, latestCount) {
   if (!ch) return `<td class="muted" title="${esc(emptyTip)}">—</td>`;
   const from = ch.from === null ? 'not in top 50' : hashPos(ch.from);
-  const to = ch.to === null ? 'not in top 50' : hashPos(ch.to);
+  const to = ch.to === null ? missLabel(latestCount) : hashPos(ch.to);
   const tip = `${from} → ${to} (compared with the check on ${fullDate(ch.since)})`;
   switch (ch.dir) {
+    case 'unknown': return `<td class="muted" title="${esc(`Unknown: ${tip}. ${missWhy(latestCount)}`)}">?<span class="rk-sr"> change unknown</span></td>`;
     case 'up': return `<td class="pos" title="Up ${ch.places} place${ch.places === 1 ? '' : 's'}: ${esc(tip)}"><span aria-hidden="true">▲</span> ${ch.places}<span class="rk-sr"> places up</span></td>`;
     case 'down': return `<td class="neg" title="Down ${-ch.places} place${ch.places === -1 ? '' : 's'}: ${esc(tip)}"><span aria-hidden="true">▼</span> ${-ch.places}<span class="rk-sr"> places down</span></td>`;
     case 'entered': return `<td class="pos" title="Entered the top 50: ${esc(tip)}"><span aria-hidden="true">▲</span> new</td>`;
@@ -62,7 +87,10 @@ function changeCell(ch, emptyTip) {
 
 function positionCell(it) {
   if (!it.checks) return '<td class="muted">not checked yet</td>';
-  if (it.position === null) return '<td class="muted">not in top 50</td>';
+  if (it.position === null) {
+    const why = missWhy(it.resultCount);
+    return `<td class="muted"${why ? ` title="${esc(why)}"` : ''}>${esc(missLabel(it.resultCount))}</td>`;
+  }
   const more = it.positions.length > 1
     ? ` <span class="muted" title="Also at ${esc(it.positions.slice(1).map(hashPos).join(', '))}">+${it.positions.length - 1} more</span>` : '';
   return `<td><a href="${T.ytVideo(it.videoId)}" target="_blank" rel="noopener" title="${esc(it.title || '')}"><b>#${it.position}</b></a>${more}</td>`;
@@ -72,8 +100,8 @@ function row(it) {
   return `<tr data-id="${esc(it.id)}" class="${it.id === selected ? 'rk-sel' : ''}">
     <td class="l"><button class="linkish rk-kw rk-show" data-id="${esc(it.id)}" title="Show rank history">${esc(it.keyword)}</button></td>
     ${positionCell(it)}
-    ${changeCell(it.change, it.checks ? 'Only one check so far' : 'Not checked yet')}
-    ${changeCell(it.change7d, 'Needs a check from at least ~7 days earlier')}
+    ${changeCell(it.change, !it.checks ? 'Not checked yet' : it.checks === 1 ? 'Only one check so far' : 'No earlier check with a definite result to compare with', it.resultCount)}
+    ${changeCell(it.change7d, 'Needs a check with a definite result from at least ~7 days earlier', it.resultCount)}
     <td>${it.best ? `<span title="On ${esc(fullDate(it.best.t))}">#${it.best.position}</span>` : '<span class="muted">—</span>'}</td>
     <td class="l"><a href="${T.ytChannel(it.channelId)}" target="_blank" rel="noopener">${esc(it.channelTitle)}</a></td>
     <td>${it.region ? esc(it.region) : '<span class="muted">any</span>'}</td>
@@ -91,7 +119,8 @@ const ticksFor = (depth) => ({ 10: [1, 5, 10], 20: [1, 5, 10, 15, 20], 30: [1, 1
 /**
  * SVG rank chart drawn at the container's real pixel width (so text and dots are not stretched).
  * Position #1 is at the TOP: up = better. Checks where the channel was not in the top 50 are
- * drawn as red markers on a separate lane below the axis.
+ * drawn as red markers on a separate lane below the axis; inconclusive checks (a short result page
+ * without the channel, so the position is unknown) as a grey "?" on the same lane.
  */
 function chartSvg(item, width) {
   const s = item.series;
@@ -122,7 +151,11 @@ function chartSvg(item, width) {
   const gap = s.length > 1 ? plotW / (s.length - 1) : plotW;
   const r = gap < 6 ? 1.5 : gap < 18 ? 2.5 : 3.5;
   const dots = s.map((p) => {
-    const tip = `<title>${esc(fullDate(p.t))}: ${p.position === null ? 'not in top 50' : `#${p.position}`}</title>`;
+    const tip = `<title>${esc(fullDate(p.t))}: ${esc(p.position === null ? missLabel(p.resultCount) : `#${p.position}`)}</title>`;
+    if (p.position === null && !conclusiveMiss(p.resultCount)) {
+      const cx = x(p.t);
+      return `<g>${tip}<text class="rk-unk" x="${cx.toFixed(1)}" y="${laneY + 5}" text-anchor="middle">?</text><rect x="${cx - 6}" y="${laneY - 7}" width="12" height="14" fill="transparent"/></g>`;
+    }
     if (p.position === null) {
       const cx = x(p.t);
       return `<g stroke="var(--bad)" stroke-width="2" stroke-linecap="round">${tip}<line x1="${cx - 4}" y1="${laneY - 4}" x2="${cx + 4}" y2="${laneY + 4}"/><line x1="${cx - 4}" y1="${laneY + 4}" x2="${cx + 4}" y2="${laneY - 4}"/><rect x="${cx - 6}" y="${laneY - 6}" width="12" height="12" fill="transparent" stroke="none"/></g>`;
@@ -136,7 +169,7 @@ function chartSvg(item, width) {
   if (t1 !== t0) xl.push(`<text x="${W - R}" y="${H - 6}" text-anchor="end">${esc(T.shortDate(t1))}</text>`);
   if (t1 - t0 > 4 * DAY && plotW > 360) xl.push(`<text x="${L + plotW / 2}" y="${H - 6}" text-anchor="middle">${esc(T.shortDate((t0 + t1) / 2))}</text>`);
 
-  const label = `Search position for "${item.keyword}" over ${s.length} check${s.length === 1 ? '' : 's'}; latest ${item.position === null ? 'not in top 50' : `#${item.position}`}${item.best ? `, best #${item.best.position}` : ''}. Higher on the chart is a better rank.`;
+  const label = `Search position for "${item.keyword}" over ${s.length} check${s.length === 1 ? '' : 's'}; latest ${item.position === null ? missLabel(item.resultCount) : `#${item.position}`}${item.best ? `, best #${item.best.position}` : ''}. Higher on the chart is a better rank.`;
   return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(label)}">${grid}${lane}${lines}${dots}${xl.join('')}</svg>`;
 }
 
@@ -156,14 +189,15 @@ function historyCard(it) {
     return T.card(`Rank history: “${it.keyword}”`, `${where} · not checked yet`, '<p class="muted">The first check will appear here. Use “Check now” or wait for the daily check.</p>');
   }
   const since = `${it.checks} check${it.checks === 1 ? '' : 's'} since ${esc(T.shortDate(it.firstChecked))}`;
+  const why = it.position === null ? missWhy(it.resultCount) : '';
   const latest = it.position === null
-    ? `<p>Not in the top 50 results on the last check (${esc(fullDate(it.lastChecked))}).</p>`
+    ? `<p>${esc(missSentence(it.channelTitle, it.resultCount))} (checked ${esc(fullDate(it.lastChecked))}).</p>${why ? `<p class="muted">${esc(why)}</p>` : ''}`
     : `<p><b>#${it.position}</b> with <a href="${T.ytVideo(it.videoId)}" target="_blank" rel="noopener">${esc(it.title || it.videoId)}</a>${it.positions.length > 1 ? `<br><span class="muted">The channel also appears at ${esc(it.positions.slice(1).map(hashPos).join(', '))}.</span>` : ''}</p>`;
   const top3 = it.top3.length
     ? `<ol>${it.top3.map((r) => `<li>${esc(r.title)} <span class="muted">· ${esc(r.channelTitle)}</span></li>`).join('')}</ol>`
     : '<p class="muted">No results.</p>';
   const body = `<div class="rk-chart"></div>
-    <p class="hint">Higher on the chart = better rank (#1 is the top search result). Red × = the channel was not in the top 50 that day.${it.checks < 2 ? ' More points appear as daily checks run.' : ''}</p>
+    <p class="hint">Higher on the chart = better rank (#1 is the top search result). Red × = the channel was not in the top 50 that day.${it.series.some((p) => p.position === null && !conclusiveMiss(p.resultCount)) ? ' Grey ? = YouTube returned fewer than 50 results and the channel was not among them, so the position that day is unknown.' : ''}${it.checks < 2 ? ' More points appear as daily checks run.' : ''}</p>
     <div class="rk-detail">
       <div><h3 class="sub-h">Latest check</h3>${latest}</div>
       <div><h3 class="sub-h">Top 3 results on the last check</h3>${top3}</div>
@@ -183,7 +217,7 @@ function quotaBar(d) {
       <span><b>${used} of ${max}</b> checks used in the last 24h</span>
       ${due ? `<button class="ghost rk-push" id="rk-check-due"${full ? ' disabled' : ''}>Check ${due} due now</button>` : ''}
     </div>
-    <p class="hint">Each check is one YouTube search request (search.list, top 50 results) plus one cheap video-details request. The limit (RANK_MAX_CHECKS_PER_DAY) counts manual and automatic checks over a rolling 24 hours.${next}${auto}</p>`;
+    <p class="hint">Each check is one YouTube search request (search.list, up to 50 results) plus one cheap video-details request. The limit (RANK_MAX_CHECKS_PER_DAY) counts manual and automatic checks over a rolling 24 hours.${next}${auto}</p>`;
 }
 
 function notesCard(d) {
@@ -193,6 +227,7 @@ function notesCard(d) {
     <li>Positions come from the YouTube Data API search (relevance order, videos only), requested with this server’s API key and no signed-in viewer. YouTube says its search may also consider a viewer’s search and watch history, so what a signed-in viewer sees can differ. Treat these numbers as a consistent day-to-day trend, not the exact position every viewer sees.</li>
     <li>“Region” is sent as the API’s <code>regionCode</code>, which limits results to videos that can be viewed in that country. It does not simulate a viewer located there.</li>
     <li>Only the top 50 video results are checked. Channels, playlists and other shelves that can appear on youtube.com are not counted.</li>
+    <li>Google’s docs note that search can return fewer results than requested. When that happens and the channel is not among them, the position is shown as unknown (“not in N results”, grey ? on the chart) rather than “not in top 50”. Such checks are skipped when computing changes and never trigger ranking alerts.</li>
     <li>Quota: Google’s API docs currently list a default of 100 search.list calls per project per day, separate from the 10,000-unit pool used by other requests and shared with every search this app runs (for example the Keyword tab). Your project’s actual limits are shown in the Google Cloud Console.</li>
   </ul></section>`;
 }
@@ -283,7 +318,7 @@ function wire() {
       const pos = res.item.position;
       message(res.checkError
         ? info(`Added “${res.item.keyword}”, but the first check did not run: ${res.checkError}`)
-        : info(`Added “${res.item.keyword}”: ${pos === null ? `${res.item.channelTitle} is not in the top 50 results right now` : `${res.item.channelTitle} ranks #${pos}`}.`));
+        : info(`Added “${res.item.keyword}”: ${pos === null ? missSentence(res.item.channelTitle, res.item.resultCount) : `${res.item.channelTitle} ranks #${pos}`}.`));
       await load({ quiet: true });
     });
   });

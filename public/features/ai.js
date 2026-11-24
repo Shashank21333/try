@@ -13,7 +13,8 @@ const TOOLS = [
 const LANGS = [['en', 'English'], ['hi', 'Hindi'], ['es', 'Spanish'], ['pt', 'Portuguese'], ['fr', 'French'], ['de', 'German'],
   ['id', 'Indonesian'], ['ar', 'Arabic'], ['ja', 'Japanese'], ['bn', 'Bengali'], ['ta', 'Tamil'], ['te', 'Telugu']];
 
-const COST_NOTE = 'YouTube autocomplete is free. Competitors cost about 4 YouTube API units each (cached 15 min; use @handles or URLs, since a bare name triggers a 100-unit channel search). Each click is one Claude request, billed by Anthropic.';
+// Quota: search.list has its own bucket (default 100 calls a day); other calls share 10,000 units a day.
+const COST_NOTE = 'YouTube autocomplete is free. Competitors cost about 4 YouTube API units each (cached 15 min). Use @handles or URLs: a bare channel name also uses one of your 100 daily YouTube search calls (default quota). Each click is one Claude request, billed by Anthropic.';
 
 // ---------- styles (reuse the app's CSS variables) ----------
 const style = document.createElement('style');
@@ -148,7 +149,7 @@ function formHtml(id) {
       <textarea id="${field('d-chapters')}" name="chapters" rows="3" maxlength="2000" placeholder="00:00 Intro&#10;01:10 Camera test&#10;04:30 Battery"></textarea>
       <label for="${field('d-links')}">Your links (optional, one per line, up to 10)</label>
       <textarea id="${field('d-links')}" name="links" rows="2" placeholder="https://example.com/my-gear"></textarea>
-      <div class="row"><p class="hint">TubeScout never invents links or timestamps: it only adds the ones you type here. One Claude request, billed by Anthropic.</p><button type="submit" class="primary">Write description</button></div>
+      <div class="row"><p class="hint">Claude is told not to write links or timestamps, and TubeScout removes any it finds that you did not type here; yours are added exactly as typed. One Claude request, billed by Anthropic.</p><button type="submit" class="primary">Write description</button></div>
     </form>`;
   }
   if (id === 'ideas') {
@@ -210,7 +211,8 @@ function renderTitles(r) {
   const patterns = g.patterns.length
     ? `<p class="hint"><b>Niche title patterns</b> (lift = median outlier score with the pattern / without):</p><ul>${g.patterns.map((p) => `<li>${esc(p.label)}: <span class="${p.lift >= 1.15 ? 'pos' : p.lift <= 0.87 ? 'neg' : ''}">${T.fx(p.lift, 2)}</span> <span class="muted">(${T.pct(p.share, 0)} of titles)</span></li>`).join('')}</ul>`
     : '';
-  const desc = `Based on: <b>${g.ideasUsed.length}</b> autocomplete searches for "${esc(r.keyword)}", <b>${g.outliersUsed.length}</b> competitor outliers (${esc(sourceText(g))}), <b>${g.patterns.length}</b> title patterns. Scores are TubeScout heuristics, not YouTube's.`;
+  const noKeyword = r.keyword ? '' : ' No target keyword was given, so titles are not checked for one. A short keyword (2-3 words) usually gets more autocomplete searches than a full sentence.';
+  const desc = `Based on: <b>${g.ideasUsed.length}</b> autocomplete searches for "${esc(g.searchSeed || r.keyword)}", <b>${g.outliersUsed.length}</b> competitor outliers (${esc(sourceText(g))}), <b>${g.patterns.length}</b> title patterns. Scores are TubeScout heuristics, not YouTube's.${esc(noKeyword)}`;
   const body = `${syntheticWarning(g)}${groundingErrors(g)}
     ${r.titles.length ? `<ol class="ai-list">${items}</ol>` : '<p class="muted">No titles came back. Try again.</p>'}
     <details class="ai-evidence"><summary>Evidence used</summary>${outlierList(g.outliersUsed)}${patterns}${searchChips(g.ideasUsed)}</details>
@@ -304,6 +306,10 @@ function renderStudio(el, status) {
     ${TOOLS.map((t) => `<div class="ai-panel" data-panel="${t.id}" hidden>${formHtml(t.id)}<div class="ai-out" aria-live="polite"></div></div>`).join('')}
     <p class="hint">Model: <code>${esc(status.model)}</code>. If Claude declines a request, the API automatically retries it on a fallback model.</p>`;
 
+  // The server gives up on Claude after status.timeoutSeconds (retries included).
+  const mins = Math.round((Number(status.timeoutSeconds) || 0) / 60);
+  const waitNote = `This usually takes under a minute${mins ? ` (TubeScout stops waiting after ${mins} minutes)` : ''}.`;
+
   const show = (id) => {
     const tool = TOOLS.some((t) => t.id === id) ? id : 'titles';
     el.querySelectorAll('.ai-seg button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tool === tool)));
@@ -327,9 +333,7 @@ function renderStudio(el, status) {
       const body = readForm(form);
       T.store.set(`ai-form-${id}`, JSON.stringify(body));
       btn.disabled = true;
-      out.innerHTML = T.loading(id === 'description' || id === 'script'
-        ? 'Asking Claude… this can take up to a minute.'
-        : 'Collecting YouTube data and asking Claude… this can take up to a minute.');
+      out.innerHTML = T.loading(`${id === 'description' || id === 'script' ? 'Asking Claude…' : 'Collecting YouTube data and asking Claude…'} ${waitNote}`);
       try {
         const r = await T.apiPost(ENDPOINT[id], body);
         const rendered = RENDER[id](r);

@@ -14,6 +14,12 @@ export const DEFAULT_MODEL = 'claude-opus-5-5';
 export const FALLBACK_BETA = 'server-side-fallback-2026-07-01';
 export const MAX_TOKENS = 16000;
 export const EFFORT = 'medium';
+// Hard cap on one Claude call, retries included (a generation normally takes well under a minute).
+// The SDK retries timeouts and transient errors (429/5xx) up to maxRetries times, so a per-attempt
+// timeout alone would allow (maxRetries + 1) x timeout plus backoff. createAI therefore also passes
+// an AbortSignal with this deadline: once it fires, the SDK stops and nothing is retried.
+export const REQUEST_DEADLINE_MS = 300_000;
+export const MAX_RETRIES = 2;
 
 // YouTube limits, from the YouTube Data API `videos` resource reference
 // (https://developers.google.com/youtube/v3/docs/videos):
@@ -39,6 +45,13 @@ const bad = (message) => httpError(400, message);
 
 export const aiEnabled = (env = {}) => Boolean(env.ANTHROPIC_API_KEY) || env.AI_ENABLED === '1';
 
+/** Options for `new Anthropic(...)`. apiKey undefined lets the SDK resolve credentials itself (e.g. an `ant auth login` profile). */
+export const clientOptions = (env = {}, { deadlineMs = REQUEST_DEADLINE_MS } = {}) => ({
+  apiKey: env.ANTHROPIC_API_KEY || undefined,
+  timeout: deadlineMs, // per attempt; the overall deadline in createAI is what bounds the whole call
+  maxRetries: MAX_RETRIES,
+});
+
 /** Lazily import the official SDK so the rest of TubeScout works without node_modules. Resolves to the Anthropic class or null. */
 export async function loadSdk(importer = () => import('@anthropic-ai/sdk')) {
   try {
@@ -58,7 +71,8 @@ export function mapApiError(err, sdk) {
     if (is(sdk.AuthenticationError)) return httpError(401, 'Invalid ANTHROPIC_API_KEY. Check the key in .env (console.anthropic.com) and restart TubeScout.');
     if (is(sdk.PermissionDeniedError)) return httpError(403, 'Your Anthropic API key is not allowed to use this model. Check AI_MODEL or your Anthropic Console permissions.');
     if (is(sdk.RateLimitError)) return httpError(429, 'Anthropic rate limit reached. Wait a minute and try again.');
-    if (is(sdk.APIConnectionTimeoutError)) return httpError(504, 'The Anthropic API took too long to respond. Try again.');
+    // APIUserAbortError: our own deadline signal fired (see REQUEST_DEADLINE_MS); nothing else aborts.
+    if (is(sdk.APIConnectionTimeoutError) || is(sdk.APIUserAbortError)) return httpError(504, 'The Anthropic API took too long to respond. Try again.');
     if (is(sdk.APIConnectionError)) return httpError(502, 'Could not reach the Anthropic API. Check your internet connection.');
     if (is(sdk.APIError)) return httpError(502, `Anthropic API error (${err.status ?? 'no status'})${err.apiMessage ? `: ${err.apiMessage}` : ''}`);
     // Anything else was thrown by the SDK before a request went out, usually missing or
@@ -97,7 +111,7 @@ export function parseResponse(res) {
  * Wrap an Anthropic client (real or fake) into a single `generate` call that returns
  * schema-constrained JSON. `sdk` is the Anthropic class, used only for its error classes.
  */
-export function createAI({ client, model = DEFAULT_MODEL, sdk = null } = {}) {
+export function createAI({ client, model = DEFAULT_MODEL, sdk = null, deadlineMs = REQUEST_DEADLINE_MS } = {}) {
   if (!client) throw new Error('createAI needs an Anthropic client');
   return {
     model,
@@ -114,7 +128,7 @@ export function createAI({ client, model = DEFAULT_MODEL, sdk = null } = {}) {
           output_config: { effort: EFFORT, format: { type: 'json_schema', schema } },
           system,
           messages: [{ role: 'user', content: user }],
-        });
+        }, { signal: AbortSignal.timeout(deadlineMs) }); // one deadline for all attempts
       } catch (err) {
         throw mapApiError(err, sdk);
       }
@@ -195,6 +209,10 @@ export function parseTitlesInput(raw) {
 
 export function parseDescriptionInput(raw) {
   const body = asObject(raw);
+  // Chapters are copied into the description verbatim, and YouTube rejects descriptions containing
+  // < or > (videos resource, snippet.description). Ask the user to fix them rather than rewrite them.
+  const chapters = str(body, 'chapters', { label: 'Chapters', max: 2000 });
+  if (/[<>]/.test(chapters)) throw bad('Chapters cannot contain < or >: YouTube does not allow them in descriptions. Write "under $300" instead of "<$300", for example.');
   const links = strList(body, 'links', { label: 'links', maxItems: 10, maxLen: 300 });
   for (const l of links) {
     let u;
@@ -207,7 +225,7 @@ export function parseDescriptionInput(raw) {
     keyword: str(body, 'keyword', { label: 'Target keyword', max: 100 }),
     summary: str(body, 'summary', { label: 'Video summary', max: 2000 }),
     links,
-    chapters: str(body, 'chapters', { label: 'Chapters', max: 2000 }),
+    chapters,
     hl: hlField(body),
   };
 }
@@ -257,7 +275,7 @@ export async function nicheGrounding({ client, tracker }, channels) {
       errors: cmp.errors,
     };
   } catch (e) {
-    return { ...empty, errors: [{ input: inputs.join(', '), message: e.message || String(e) }] };
+    return { ...empty, errors: [{ input: inputs.join(', '), message: e.message || String(e), status: e.status }] };
   }
 }
 
@@ -310,19 +328,20 @@ const outlierRow = (o, i) => ({
 });
 
 export function buildTitlesPrompt(input, g) {
-  const kw = input.keyword || input.topic;
+  const kw = input.keyword; // optional: the topic is a description, not a keyword to repeat verbatim
   const user = [
     `Write ${input.count} distinct YouTube title options for one video.`,
-    dataBlock('video_brief', [{ topic: clean(input.topic, 500), target_keyword: clean(kw, 100) }]),
+    dataBlock('video_brief', [{ topic: clean(input.topic, 500), target_keyword: kw ? clean(kw, 100) : '(not provided)' }]),
     'Rules:',
     `- Keep each title within ${TITLE_VISIBLE_CHARS} characters so it is not cut off in search results (YouTube's hard limit is ${TITLE_MAX_CHARS}).`,
-    `- Include the target keyword naturally, ideally near the start.`,
+    kw ? '- Include the target keyword naturally, ideally near the start.'
+      : '- No target keyword was given: lead with the words viewers would actually search for on this topic (the autocomplete searches below show real phrasing), not the wording of the brief.',
     '- Use a different angle for each title (how-to, list, comparison, result/story, mistake/warning, question, ...).',
     '- Promise only what a video on this topic can deliver. No clickbait without substance. No ALL-CAPS titles (one emphasised word is fine).',
     '- Prefer the title patterns that over-perform in this niche (lift above 1.0 in title_patterns) and avoid those that under-perform.',
     '- For each title give "angle" (2-4 words) and "why" (one sentence naming the evidence it builds on: an autocomplete search or an outlier ref like O2).',
     langLine(input.hl),
-    'Real YouTube autocomplete suggestions related to the keyword (what people type into YouTube search; most common first):',
+    `Real YouTube autocomplete suggestions related to the ${kw ? 'target keyword' : 'topic'} (what people type into YouTube search; most common first):`,
     dataBlock('autocomplete_searches', g.ideas.map((s) => clean(s, 120))),
     `Competitor videos that beat their own channel's typical views (outliers)${g.synthetic ? ' [synthetic demo data]' : ''}:`,
     dataBlock('competitor_outliers', g.outliers.map(outlierRow)),
@@ -536,14 +555,28 @@ export function cleanHashtags(list, max = MAX_HASHTAGS) {
   return out;
 }
 
-const URL_RE = /\b(?:https?:\/\/|www\.)[^\s<>()]+/giu;
+// Links in model text: anything starting with a scheme or "www.", plus bare domains such as
+// "nordvpn.com/deal" (any letter TLD when a path follows) or "instagram.com" (common TLDs only, so
+// words like "Node.js" are not taken for links). A heuristic: it cannot catch every way to write a link.
+const COMMON_TLDS = 'com|net|org|io|co|gg|tv|me|ly|app|dev|in|uk|ca|au|de|info|xyz|link|shop|store|ai|fm';
+const URL_RE = new RegExp(String.raw`(?:\bhttps?:\/\/|\bwww\.)[^\s<>()]+|\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:[a-z]{2,24}\/[^\s<>()]*|(?:${COMMON_TLDS})\b)`, 'giu');
+
+/** Comparable form of a link: no scheme, no "www.", lower-case host, no trailing punctuation or slash. */
+export function linkKey(link) {
+  const s = String(link).trim().replace(/[).,;:!?'"]+$/u, '').replace(/^https?:\/\//i, '').replace(/^www\./i, '');
+  const slash = s.indexOf('/');
+  return slash < 0 ? s.toLowerCase() : s.slice(0, slash).toLowerCase() + s.slice(slash).replace(/\/+$/, '');
+}
+
+/** Every link-like string in a text (see URL_RE). */
+export const findLinks = (text) => String(text ?? '').match(URL_RE) || [];
 const TIMESTAMP_LINE = /^\s*[-*•]?\s*\(?\d{1,2}:\d{2}(?::\d{2})?\)?(\s|$)/;
 const HASHTAG_LINE = /^\s*(#[\p{L}\p{N}\p{M}_]+[\s,]*)+$/u;
 
 /** Remove links the user did not supply, and timestamp or hashtag-only lines (TubeScout appends the user's own). */
 export function scrubDescription(text, allowedLinks = []) {
-  const allowed = new Set(allowedLinks.map((l) => l.replace(/[).,;!?]+$/, '')));
-  const invented = (s) => (s.match(URL_RE) || []).some((u) => !allowed.has(u.replace(/[).,;!?]+$/, '')));
+  const allowed = new Set(allowedLinks.map(linkKey));
+  const invented = (s) => findLinks(s).some((u) => !allowed.has(linkKey(u)));
   return String(text ?? '')
     .replace(/[<>]/g, '') // the API rejects < and > in descriptions
     .split('\n')
@@ -595,6 +628,8 @@ const cleanLine = (s, max = 300) => clean(s, max);
 const groundedOutlier = (o) => ({ id: o.id, title: o.title, channelTitle: o.channelTitle, outlierScore: o.outlierScore, isShort: o.isShort, views: o.views });
 
 export async function generateTitles(ai, deps, input) {
+  // Autocomplete needs a seed, so without a keyword we search the topic. The topic is not a keyword,
+  // though: titles are only checked for (and prompted with) a keyword the user actually typed.
   const seed = input.keyword || input.topic;
   const [niche, search] = await Promise.all([
     nicheGrounding(deps, input.channels),
@@ -612,12 +647,13 @@ export async function generateTitles(ai, deps, input) {
     .map((t) => ({ title: cleanLine(t?.title, 150), angle: cleanLine(t?.angle, 80), why: cleanLine(t?.why, 400) }))
     .filter((t) => t.title && !seen.has(t.title.toLowerCase()) && seen.add(t.title.toLowerCase()))
     .slice(0, input.count)
-    .map((t) => ({ ...t, ...scoreTitle(t.title, { keyword: seed, patterns: g.patterns }) }))
+    .map((t) => ({ ...t, ...scoreTitle(t.title, { keyword: input.keyword, patterns: g.patterns }) }))
     .sort((a, b) => b.score - a.score);
   return {
     titles,
-    keyword: seed,
+    keyword: input.keyword,
     grounding: {
+      searchSeed: search.seed,
       ideasUsed: g.ideas,
       outliersUsed: g.outliers.map(groundedOutlier),
       patterns: g.patterns,
@@ -670,6 +706,15 @@ export async function generateIdeas(ai, deps, input) {
   // With no keyword, seed autocomplete with the niche's most common title keyword.
   const seed = input.keyword || niche.keywords?.[0]?.term || '';
   if (!seed && !niche.outliers.length) {
+    if (!niche.channels.length && niche.errors.length) {
+      // Channels were given (or tracked) but none loaded: say why instead of asking for channels.
+      const statuses = [...new Set(niche.errors.map((e) => e.status))];
+      const status = statuses.length === 1 && statuses[0] >= 400 && statuses[0] < 600 ? statuses[0] : 400;
+      const why = niche.errors.map((e) => `${e.input}: ${String(e.message).replace(/[.\s]+$/, '')}`).join('; ');
+      const which = niche.source === 'tracked' ? 'your tracked channels' : 'your competitor channels';
+      throw httpError(status, `Could not load ${which} (${why}). Check the channels, or add a keyword.`);
+    }
+    if (niche.channels.length) throw bad('Your competitor channels have too few videos to find outliers or common keywords. Add a keyword.');
     throw bad('Add a keyword or some competitor channels (or track channels in the Tracking tab) so ideas can be grounded in real data.');
   }
   const search = await searchGrounding(seed, { hl: input.hl, region: input.region, fetchImpl: deps.fetchImpl });

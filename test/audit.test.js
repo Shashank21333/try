@@ -115,6 +115,34 @@ test('parseChapters enforces YouTube chapter rules precisely', () => {
   assert.equal(parseChapters('0:00 A\n0:20 B\n0:55 C', 0).valid, true);
 });
 
+test('parseChapters checks only the chapter list, not lone times elsewhere in the description', () => {
+  // A schedule line after a valid list is not a 4th chapter "past the end of the video".
+  const sched = parseChapters('0:00 Intro\n1:00 Part\n2:00 End\n\nNew videos every Friday at 18:00', 600);
+  assert.equal(sched.valid, true);
+  assert.equal(sched.count, 3);
+  assert.equal(sched.ignored, 1);
+  // A music credit with a track length is not a (broken) chapter list.
+  const credit = parseChapters('Great video about lofi.\nMusic: Lofi beat - 2:45', 600);
+  assert.equal(credit.found, false);
+  assert.equal(credit.ignored, 1);
+  assert.equal(parseChapters('Music:\nLofi beat - 2:45\nChill vibes - 3:10', 600).found, false); // a tracklist with lengths
+  // ...and a credit next to a valid list does not break it.
+  assert.equal(parseChapters('0:00 Intro\n1:30 Cameras\n4:00 Battery\n\nMusic: Lofi beat - 2:45', 600).valid, true);
+  // Time-last lists still work and still drop a time-last schedule line past the end of the video.
+  const endStyle = parseChapters('Intro - 0:00\nMiddle (2:00)\nEnd 5:00\n\nLive every Friday at 18:00', 600);
+  assert.equal(endStyle.valid, true);
+  assert.equal(endStyle.count, 3);
+  // Lists split by blank lines or section headings are still one list.
+  assert.equal(parseChapters('0:00 Intro\n\n1:00 Setup\n\n2:00 Result', 600).count, 3);
+  const parts = parseChapters('PART 1\n0:00 Intro\n1:00 Setup\nPART 2\n5:00 Build\n6:00 Test', 600);
+  assert.equal(parts.valid, true);
+  assert.equal(parts.count, 4);
+  // A list that forgot 0:00 is still found and reported.
+  assert.match(parseChapters('Timestamps:\n0:30 Intro\n1:00 A\n2:00 B', 600).problems.join(' '), /must be 0:00/);
+  // A lone 0:00 line is a list attempt with too few timestamps.
+  assert.match(parseChapters('0:00 Intro', 600).problems.join(' '), /Only 1 timestamp/);
+});
+
 // ---------------------------------------------------------------- tags, hashtags, caps
 
 test('tagCharCount counts like the YouTube API (commas and quotes)', () => {
@@ -130,11 +158,16 @@ test('extractHashtags finds distinct hashtags and ignores C#, URL fragments and 
   assert.deepEqual(extractHashtags('I code in C# — see https://x.com/page#section and #1'), []);
 });
 
-test('isShouty flags mostly-capital titles and 3+ ALL-CAPS words', () => {
+test('isShouty flags mostly-capital titles and 2+ long ALL-CAPS words, not acronyms', () => {
   assert.equal(isShouty('THIS IS THE BEST PHONE EVER'), true);
   assert.equal(isShouty('The NEW iPhone is INSANE and CHEAP'), true);
+  assert.equal(isShouty('Это САМЫЙ ДЕШЁВЫЙ телефон в мире'), true); // non-Latin scripts too
   assert.equal(isShouty('Why Everyone Is WRONG About the GPU'), false);
   assert.equal(isShouty('OK'), false);
+  // Ordinary acronyms are not shouting.
+  assert.equal(isShouty('AMD vs NVIDIA: Best GPU for 1440p Gaming'), false);
+  assert.equal(isShouty('How NASA and the FAA Plan the SLS Launch'), false);
+  assert.equal(isShouty('NVIDIA RTX 5090 Review: Is NVIDIA Still the King?'), false); // same word twice
 });
 
 // ---------------------------------------------------------------- video checks
@@ -195,6 +228,22 @@ test('keyword checks: title phrase vs words, early vs late in description, tags'
   assert.equal(check(kw({ tags: ['budget phone 2026'] }), 'keyword-tags').passed, true);
   assert.equal(check(kw({ tags: ['phones'] }), 'keyword-tags').passed, false);
   assert.equal(check(kw({}, '   '), 'keyword-title'), undefined);
+});
+
+test('keyword checks work in languages written without spaces (Japanese, Chinese, Thai)', () => {
+  const ja = scoreVideo(rawVideo({
+    title: '最強の格安スマホランキング2026年版', description: '今年の格安スマホを徹底比較しました。', tags: ['格安スマホ おすすめ'],
+  }), { keyword: '格安スマホ' });
+  assert.equal(check(ja, 'keyword-title').points, 10);
+  assert.equal(check(ja, 'keyword-description').points, 8);
+  assert.equal(check(ja, 'keyword-tags').passed, true);
+  assert.equal(check(scoreVideo(rawVideo({ title: '最好的手机评测' }), { keyword: '手机' }), 'keyword-title').points, 10);
+  assert.equal(check(scoreVideo(rawVideo({ title: 'รีวิวมือถือราคาถูกที่สุด' }), { keyword: 'มือถือ' }), 'keyword-title').points, 10);
+  assert.equal(check(scoreVideo(rawVideo({ title: '最強のノートパソコン' }), { keyword: '格安スマホ' }), 'keyword-title').points, 0);
+  // Words of a spaced CJK keyword are matched one by one
+  assert.equal(check(scoreVideo(rawVideo({ title: 'スマホ選びの格安ガイド' }), { keyword: '格安 スマホ' }), 'keyword-title').points, 6);
+  // Space-separated languages keep the word-boundary match: "phone" is not found inside "smartphones".
+  assert.equal(check(scoreVideo(rawVideo({ title: 'Best smartphones of the year' }), { keyword: 'phone' }), 'keyword-title').points, 0);
 });
 
 test('description length check (long-form vs Shorts thresholds)', () => {
@@ -297,6 +346,27 @@ test('engagement vs channel context', () => {
   assert.equal(low.points, 0);
   assert.match(low.detail, /4\.50% vs 10\.00%/);
   assert.equal(check(scoreVideo(rawVideo({ views: 0 }), { context: { medianEngagement: 0.05 } }), 'engagement'), undefined);
+});
+
+test('engagement: a hidden like count is not compared with a likes + comments baseline', () => {
+  const hidden = rawVideo({ views: 10_000, comments: 50 });
+  delete hidden.statistics.likeCount;
+  const r = scoreVideo(hidden, { context: { medianEngagement: 0.045 } });
+  const c = check(r, 'engagement');
+  assert.equal(c.info, true);
+  assert.equal(c.passed, true);
+  assert.equal(c.maxPoints, 0);
+  assert.match(c.detail, /like count is hidden/);
+  assert.ok(!failedChecks(r.checks).some((x) => x.id === 'engagement'));
+  // Disabled comments count as zero comments: likes alone are still comparable.
+  const noComments = rawVideo({ views: 10_000, likes: 450 });
+  delete noComments.statistics.commentCount;
+  assert.equal(check(scoreVideo(noComments, { context: { medianEngagement: 0.045 } }), 'engagement').points, 8);
+});
+
+test('Shorts link note says the format is inferred from length', () => {
+  const r = scoreVideo(rawVideo({ duration: 'PT2M30S', description: 'More at https://example.com' }));
+  assert.match(check(r, 'links-cta').detail, /3 minutes or less .* If it is a Short, links in its description are not clickable/);
 });
 
 test('Shorts get Shorts-appropriate checks', () => {
@@ -432,6 +502,28 @@ test('formatBaselines splits medians by format', () => {
   assert.equal(b.long.medianViews, 20);
   assert.equal(b.long.medianEngagement, 0.02);
   assert.equal(b.long.count, 2);
+  // Videos with hidden likes (comments-only rates) stay out of the engagement median.
+  const h = formatBaselines([
+    { isShort: false, views: 10, likes: null, comments: 1, engagementRate: 0.001 },
+    { isShort: false, views: 10, likes: 4, comments: 1, engagementRate: 0.25 },
+    { isShort: false, views: 10, likes: 6, comments: 1, engagementRate: 0.75 },
+  ]);
+  assert.equal(h.long.medianEngagement, 0.5);
+  assert.equal(h.long.count, 3);
+});
+
+test('auditChannel: hidden likes neither fail videos nor drag down the engagement checks', () => {
+  const videos = [];
+  for (let i = 0; i < 8; i++) {
+    const v = rawVideo({ id: `hid${String(i).padStart(8, '0')}`, views: 10_000, likes: 400, comments: 50, days: 3 + i * 4 });
+    if (i % 2) delete v.statistics.likeCount; // every other video hides its likes
+    videos.push(v);
+  }
+  const a = auditChannel(rawChannel(), videos, { now: NOW, complete: true });
+  for (const v of a.videos) assert.ok(!v.topIssues.includes('Engagement vs channel'), v.id);
+  const eng = a.sections.find((s) => s.title === 'Performance').checks.find((c) => c.id === 'engagement');
+  assert.match(eng.detail, /4\.50%/); // (400 + 50) / 10,000 from the public-likes videos only
+  assert.equal(eng.points, eng.maxPoints);
 });
 
 // ---------------------------------------------------------------- HTTP handlers via create(ctx)

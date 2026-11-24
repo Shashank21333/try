@@ -4,7 +4,7 @@
 // The official Anthropic SDK is imported lazily, so TubeScout still runs without node_modules;
 // AI endpoints then answer 503 "Run npm install to enable AI features".
 import {
-  DEFAULT_MODEL, SETUP_MESSAGE, SDK_MISSING_MESSAGE, aiEnabled, loadSdk, createAI,
+  DEFAULT_MODEL, SETUP_MESSAGE, SDK_MISSING_MESSAGE, REQUEST_DEADLINE_MS, aiEnabled, loadSdk, createAI, clientOptions,
   parseTitlesInput, parseDescriptionInput, parseIdeasInput, parseScriptInput,
   generateTitles, generateDescription, generateIdeas, generateScript,
 } from '../ai.js';
@@ -39,9 +39,10 @@ export function create(ctx, overrides = {}) {
     if (!Anthropic) throw httpError(503, SDK_MISSING_MESSAGE);
     // Credentials: ANTHROPIC_API_KEY from TubeScout's env (.env), else the SDK's own resolution
     // (e.g. an `ant auth login` profile when AI_ENABLED=1). The key is never logged or returned.
-    // A generation normally takes well under a minute; cap the wait so the UI never hangs for 10 minutes.
-    const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY || undefined, timeout: 300_000, maxRetries: 2 });
-    ai = createAI({ client, model, sdk: Anthropic });
+    // clientOptions + createAI cap one generation at REQUEST_DEADLINE_MS in total, retries included
+    // (the SDK default would be a 10-minute timeout per attempt, retried twice).
+    const client = new Anthropic(clientOptions(env));
+    ai = createAI({ client, model, sdk: Anthropic, deadlineMs: REQUEST_DEADLINE_MS });
     return ai;
   }
 
@@ -67,6 +68,7 @@ export function create(ctx, overrides = {}) {
         enabled: aiEnabled(env),
         model,
         sdkInstalled: overrides.anthropicClient ? true : Boolean(await getSdk()),
+        timeoutSeconds: REQUEST_DEADLINE_MS / 1000, // the UI tells users how long it will wait at most
       }),
       'POST /api/ai/titles': post(parseTitlesInput, (engine, input) => generateTitles(engine, deps, input)),
       'POST /api/ai/description': post(parseDescriptionInput, (engine, input) => generateDescription(engine, input)),

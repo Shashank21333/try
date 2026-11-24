@@ -6,7 +6,10 @@
 
 importScripts('lib.js');
 const L = self.TubeScoutLib;
-const TIMEOUT_MS = 60_000; // keyword demand and first-time channel analysis can take a while
+// Chrome stops an extension service worker when a fetch() response takes more than 30s
+// (developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle),
+// so give up a little earlier and report a clear timeout instead.
+const TIMEOUT_MS = 25_000;
 
 // The password lives in chrome.storage.local; keep that area away from content scripts.
 // (setAccessLevel is missing in old Chrome versions: the extension still works there.)
@@ -31,12 +34,27 @@ async function getSettings() {
   };
 }
 
-/** Call the TubeScout server. Always resolves to { ok, ... } so callers never see raw exceptions. */
-async function callApi({ method, path, body }) {
+/** Messages from the extension's own pages (options, popup), not from content scripts on YouTube. */
+const fromExtensionPage = (sender) => typeof sender.url === 'string' && sender.url.startsWith(chrome.runtime.getURL(''));
+
+/**
+ * Call the TubeScout server. Always resolves to { ok, ... } so callers never see raw exceptions.
+ * `settings` = { serverUrl, password } replaces the saved ones for this one call; only the
+ * options page uses it ("Test connection" on values that are not saved yet).
+ */
+async function callApi({ method, path, body, settings }) {
   const check = L.checkRequest(method, path, body);
   if (!check.ok) return { ok: false, kind: 'forbidden', error: check.reason };
 
-  const { serverUrl, password } = await getSettings();
+  let serverUrl;
+  let password;
+  if (settings) {
+    serverUrl = L.normalizeServerUrl(settings.serverUrl);
+    password = typeof settings.password === 'string' ? settings.password : '';
+    if (!serverUrl) return { ok: false, kind: 'forbidden', error: 'Invalid server URL.' };
+  } else {
+    ({ serverUrl, password } = await getSettings());
+  }
   const base = { serverUrl, path: check.path.split('?')[0] };
   if (!L.isBuiltinHost(serverUrl)) {
     const granted = await chrome.permissions.contains({ origins: [L.originPattern(serverUrl)] }).catch(() => false);
@@ -95,7 +113,8 @@ async function callApi({ method, path, body }) {
 }
 
 const HANDLERS = {
-  api: (msg) => callApi(msg),
+  // Content scripts may only use the saved server; a one-off override is for extension pages.
+  api: (msg, sender) => callApi({ ...msg, settings: fromExtensionPage(sender) && msg.settings && typeof msg.settings === 'object' ? msg.settings : null }),
   // Content scripts only learn the server URL (for dashboard links), never the password.
   config: async () => ({ ok: true, serverUrl: (await getSettings()).serverUrl }),
   getPrefs: async () => {

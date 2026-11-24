@@ -8,7 +8,7 @@ A Manifest V3 extension that shows data from **your own** TubeScout server direc
 | `/@handle`, `/channel/UC…`, `/user/…` | Subscribers, median views, uploads per week, engagement, top 3 outlier videos. Buttons: **Track channel**, **Open in TubeScout** | `GET /api/channel` |
 | `/results?search_query=…` | Autocomplete strength with the prefix that triggers it, top 8 keyword ideas. Button: **Research in TubeScout** | `GET /api/demand` |
 
-On watch pages the panel sits at the top of the recommendations column; elsewhere it floats at the top right. Click the header to collapse it (remembered). It follows YouTube's light or dark theme.
+On watch pages the panel sits at the top of the recommendations column, or under the video's title and description when the window is too narrow for that column; elsewhere it floats at the top right. A floating panel that would cover a video (for example on Shorts in a narrow window) starts collapsed on that page. Click the header to collapse or expand it (remembered for all pages). It follows YouTube's light or dark theme.
 
 ## Install (unpacked)
 
@@ -25,7 +25,7 @@ Open the settings from the toolbar popup (**Settings**) or the slider icon in th
 
 - **Server URL**: where TubeScout runs. `http://localhost:<any port>` and `http://127.0.0.1:<any port>` work out of the box. Any other address (another computer, `https://…`) makes Chrome ask for permission to reach that host when you click **Save**. Access to the previous non-local host is removed when you change it.
 - **Password**: only if you set `APP_PASSWORD` on the server. It is sent as HTTP Basic auth (any username).
-- **Test connection** shows live/demo mode, API units used since the server started, enabled integrations, and warns if the server is too old for the video panel.
+- **Test connection** checks the URL and password typed in the form, even before you save them (a new non-local host needs **Save** first so Chrome can grant access), and shows live/demo mode, API units used since the server started, enabled integrations, and warns if the server is too old for the video panel.
 
 ## Permissions
 
@@ -48,7 +48,8 @@ The extension talks only to the server URL you configure. For the YouTube page y
 - **Keyword panel** uses YouTube's public autocomplete (no API units). If your server has `SERPAPI_KEY` or `KE_API_KEY` set, `/api/demand` also spends those credits, so the panel waits for a click instead of loading automatically.
 - **Demo mode** (no `YOUTUBE_API_KEY` on the server): video and channel numbers are synthetic and the panel says so. Keyword data is real.
 - The SEO score and outlier score are TubeScout's heuristics, not YouTube ranking rules; checks that are actual YouTube limits are labeled "YouTube rule".
-- YouTube's page structure and its `yt-navigate-finish` event are not a public API. The extension also watches the URL as a fallback and floats the panel if it cannot find the sidebar, but a YouTube redesign can still affect placement.
+- YouTube's page structure and its `yt-navigate-finish` event are not a public API. The extension also watches the URL as a fallback and floats the panel if it cannot find the sidebar or the area under the video, but a YouTube redesign can still affect placement.
+- Requests to your server time out after 25 seconds, because Chrome stops an extension's background worker when a request gets no response for 30 seconds.
 - Only `www.youtube.com` is supported (not `m.youtube.com`, YouTube Music or YouTube Studio).
 
 ## Files

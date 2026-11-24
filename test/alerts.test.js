@@ -6,7 +6,8 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import {
   AlertManager, snapshotAlerts, rankAlert, milestoneCrossed, validateSettingsPatch, normalizeSettings, defaultSettings,
-  webhookKind, deliveryConfig, telegramRequest, webhookBody, clip, TELEGRAM_MAX, DISCORD_MAX, MAX_ALERTS,
+  webhookKind, deliveryConfig, telegramRequest, webhookBody, discordEscape, clip, retryAfterMs, TELEGRAM_MAX, DISCORD_MAX, MAX_ALERTS,
+  PACE_MS, MAX_RATE_LIMIT_WAIT_MS,
 } from '../src/alerts.js';
 import { create } from '../src/features/alerts.js';
 import { JsonStore } from '../src/store.js';
@@ -97,6 +98,67 @@ test('breakout: ratio and views/day thresholds from settings', () => {
   assert.deepEqual(snapshotAlerts(event(snaps), loose).filter((a) => a.type === 'breakout').map((a) => a.videoId).sort(), ['hot', 'warm']);
   const strict = { ...defaultSettings(), breakoutRatio: 60 };
   assert.equal(snapshotAlerts(event(snaps), strict).filter((a) => a.type === 'breakout').length, 0);
+});
+
+// A mid-size channel: 29 videos 5+ weeks old with 50K views each, gaining 300/day; daily snapshots.
+const HOUR = 3_600_000;
+const olds = Array.from({ length: 29 }, (_, i) => vid(`o${i}`, T0 - (i + 5) * 7 * DAY, 50_000));
+const grown = (t, gain) => olds.map((v) => ({ ...v, views: v.views + gain * ((t - T0) / DAY) }));
+const types = (alerts) => alerts.map((a) => `${a.type}:${a.videoId}`);
+
+test('an ordinary new upload never counts as a breakout (first hours or following days)', () => {
+  const s0 = snap(T0, 120_000, olds);
+  const s1 = snap(T0 + DAY, 120_100, [vid('new', T0 + DAY - 3 * HOUR, 2000), ...grown(T0 + DAY, 300)]);
+  const s2 = snap(T0 + 2 * DAY, 120_200, [vid('new', T0 + DAY - 3 * HOUR, 12_000), ...grown(T0 + 2 * DAY, 300)]);
+  const s3 = snap(T0 + 3 * DAY, 120_300, [vid('new', T0 + DAY - 3 * HOUR, 18_000), ...grown(T0 + 3 * DAY, 300)]);
+  // Before the fix: an 'upload' and a 'breakout' (53x typical) for the same video in the same snapshot.
+  assert.deepEqual(types(snapshotAlerts(event([s0, s1]))), ['upload:new']);
+  // Day 2: +10K/day is 33x the old videos' gain, but normal for a video's second day.
+  assert.deepEqual(types(snapshotAlerts(event([s0, s1, s2]))), []);
+  assert.deepEqual(types(snapshotAlerts(event([s0, s1, s2, s3]))), []);
+});
+
+test('a young video far above the channel’s typical video is a breakout, from the next snapshot on', () => {
+  const s0 = snap(T0, 120_000, olds);
+  const s1 = snap(T0 + DAY, 120_100, [vid('hit', T0 + DAY - 5 * HOUR, 160_000), ...grown(T0 + DAY, 300)]);
+  const s2 = snap(T0 + 2 * DAY, 121_000, [vid('hit', T0 + DAY - 5 * HOUR, 400_000), ...grown(T0 + 2 * DAY, 300)]);
+  // Same snapshot as its upload alert: one message only.
+  assert.deepEqual(types(snapshotAlerts(event([s0, s1]))), ['upload:hit']);
+  const noUploads = { ...defaultSettings(), types: { ...defaultSettings().types, upload: false } };
+  assert.deepEqual(types(snapshotAlerts(event([s0, s1]), noUploads)), ['upload:hit', 'breakout:hit'], 'upload alerts off: nothing to wait for');
+  const [br] = snapshotAlerts(event([s0, s1, s2]));
+  assert.equal(`${br.type}:${br.videoId}`, 'breakout:hit');
+  assert.equal(br.dedupeKey, 'breakout:hit');
+  assert.equal(br.title, 'Breakout video on Rival Channel');
+  assert.match(br.message, /already has 400K views after 29 hours, 7\.9× the channel's typical video \(median 50\.6K views across 29 videos at least a week old\)/);
+  // Thresholds from settings still apply.
+  assert.deepEqual(snapshotAlerts(event([s0, s1, s2]), { ...defaultSettings(), breakoutRatio: 10 }), []);
+
+  // Shorts are compared with Shorts: with fewer than 3 established Shorts there is no fair baseline.
+  const short = { ...s2.videos[0], isShort: true };
+  assert.deepEqual(snapshotAlerts(event([s0, s1, { ...s2, videos: [short, ...s2.videos.slice(1)] }])), []);
+});
+
+test('no breakouts from a forced snapshot minutes after the previous one (less than 12h of history)', () => {
+  const s0 = snap(T0, 120_000, olds);
+  const s1 = snap(T0 + 10 * 60_000, 120_000, olds.map((v, i) => ({ ...v, views: v.views + (i === 3 ? 20 : 0) })));
+  assert.deepEqual(snapshotAlerts(event([s0, s1])), []); // before the fix: 2880x "breakout" for o3
+  // Also not when the young-video rule would otherwise apply.
+  const s1b = { ...s1, videos: [vid('hit', T0 - 2 * DAY, 400_000), ...s1.videos] };
+  assert.deepEqual(snapshotAlerts(event([{ ...s0, videos: [vid('hit', T0 - 2 * DAY, 399_000), ...olds] }, s1b])), []);
+
+  // 13h later the tracker's baseline is the first snapshot and a real jump alerts, with the real time span.
+  const s2 = snap(T0 + 13 * HOUR, 120_000, olds.map((v, i) => ({ ...v, views: v.views + (i === 3 ? 20_000 : 150) })));
+  const br = snapshotAlerts(event([s0, s1, s2]));
+  assert.deepEqual(types(br), ['breakout:o3']);
+  assert.match(br[0].message, /gained ~37\.4K views\/day over the last 13 hours \(133\.2× the channel's typical 280\.5\/day\)/);
+});
+
+test('breakout on a channel whose videos gain nothing says so instead of "0/day"', () => {
+  const s0 = snap(T0, 5_000, olds);
+  const s1 = snap(T0 + DAY, 5_000, olds.map((v, i) => ({ ...v, views: v.views + (i === 0 ? 2000 : 0) })));
+  const [br] = snapshotAlerts(event([s0, s1]));
+  assert.match(br.message, /gained ~2K views\/day over the last 24 hours \(the channel's typical video gains under 1 view\/day\)/);
 });
 
 test('subscriber milestones', () => {
@@ -265,7 +327,24 @@ test('payload formatting: Telegram, Discord, Slack, generic', () => {
 
   const dc = webhookBody(alert, 'discord');
   assert.deepEqual(dc.allowed_mentions, { parse: [] });
-  assert.equal(dc.content, tg.body.text);
+  assert.equal(dc.content, 'New video from A & B \\<C\\>\n“@everyone look” · 5 views\nhttps://www.youtube.com/watch?v=x1');
+
+  // Discord renders markdown: third-party titles are escaped, our own URL line is not.
+  const md = webhookBody({ ...alert, title: '# Big **news**', message: '“[click](https://x.example) __u__ ~~s~~ ||spoiler|| `code` <@123>”\n- item\n> quote', url: 'https://www.youtube.com/watch?v=a_b-c', demo: true }, 'discord');
+  assert.equal(md.content, [
+    '\\[Demo data\\] \\# Big \\*\\*news\\*\\*',
+    '“\\[click\\](https://x.example) \\_\\_u\\_\\_ \\~\\~s\\~\\~ \\|\\|spoiler\\|\\| \\`code\\` \\<@123\\>”',
+    '\\- item',
+    '\\> quote',
+    'https://www.youtube.com/watch?v=a_b-c',
+  ].join('\n'));
+  assert.equal(discordEscape('1. one\n-# sub\n10 tips (2026)'), '1\\. one\n-\\# sub\n10 tips (2026)');
+  // Clipping keeps the URL and never leaves a dangling escape before the ellipsis.
+  for (const title of ['A', 'AB']) { // both parities of where the cut lands inside "\*\*\*…"
+    const longMd = webhookBody({ ...alert, title, message: '*'.repeat(3000) }, 'discord').content;
+    assert.ok(longMd.length <= DISCORD_MAX);
+    assert.ok(longMd.endsWith('\\*…\nhttps://www.youtube.com/watch?v=x1'), 'URL kept, no lone backslash before the ellipsis');
+  }
 
   const sl = webhookBody(alert, 'slack');
   assert.deepEqual(sl, { text: 'New video from A &amp; B &lt;C&gt;\n“@everyone look” · 5 views\n<https://www.youtube.com/watch?v=x1>' });
@@ -292,9 +371,12 @@ test('alerts are delivered to every enabled channel; failures are recorded and r
       return response(204, '');
     });
     const env = { TELEGRAM_BOT_TOKEN: TOKEN, TELEGRAM_CHAT_ID: '42', ALERT_WEBHOOK_URL: DISCORD_URL };
-    const m = new AlertManager({ store: new JsonStore(dir), env, fetch, now: () => T0 + DAY });
+    const m = new AlertManager({ store: new JsonStore(dir), env, fetch, now: () => T0 + DAY, sleep: async () => {} });
     const created = await m.handleSnapshot(event(twoSnapshots()));
     assert.equal(created.length, 3);
+    // In the feed right away, delivery still queued.
+    for (const a of (await m.list()).alerts) assert.deepEqual(a.deliveries, [{ channel: 'telegram', pending: true }, { channel: 'discord', pending: true }]);
+    await m.idle();
     assert.equal(fetch.calls.length, 6); // 3 alerts x 2 channels
     const discordCalls = fetch.calls.filter((c) => c.url === DISCORD_URL);
     assert.equal(discordCalls.length, 3);
@@ -310,6 +392,7 @@ test('alerts are delivered to every enabled channel; failures are recorded and r
     await m.saveSettings({ delivery: { telegram: false } });
     fetch.calls.length = 0;
     await m.handleRanks({ itemId: 'x', keyword: 'kw', previous: { position: 30, t: T0 }, current: { position: 5, videoId: 'v', title: 't', t: T0 + DAY } });
+    await m.idle();
     assert.deepEqual(fetch.calls.map((c) => c.url), [DISCORD_URL]);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
@@ -324,8 +407,10 @@ test('network errors and timeouts never throw and never leak secrets', async () 
     };
     const m = new AlertManager({ store: new JsonStore(dir), env, fetch, now: () => T0 + DAY, timeoutMs: 30 });
     const keepAlive = setTimeout(() => {}, 5000); // AbortSignal.timeout timers are unref'd; keep the test process alive
-    const [a] = await m.handleRanks({ itemId: 'x', keyword: 'kw', previous: { position: 30, t: T0 }, current: { position: 5, videoId: 'v', title: 't', t: T0 + DAY } });
+    await m.handleRanks({ itemId: 'x', keyword: 'kw', previous: { position: 30, t: T0 }, current: { position: 5, videoId: 'v', title: 't', t: T0 + DAY } });
+    await m.idle();
     clearTimeout(keepAlive);
+    const [a] = (await m.list()).alerts;
     const tg = a.deliveries.find((d) => d.channel === 'telegram');
     const sl = a.deliveries.find((d) => d.channel === 'slack');
     assert.equal(tg.ok, false);
@@ -335,6 +420,141 @@ test('network errors and timeouts never throw and never leak secrets', async () 
     assert.match(sl.error, /No response within 30ms/);
     const stored = JSON.stringify(await new JsonStore(dir).read('alerts', []));
     assert.ok(!stored.includes(TOKEN) && !stored.includes('XXXXSECRETXXXX'));
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+/** Fake clock: sleep() advances now() and records how long each wait was. */
+function fakeClock(start = T0 + DAY) {
+  const c = { t: start, sleeps: [] };
+  c.now = () => c.t;
+  c.sleep = async (ms) => { c.sleeps.push(ms); c.t += ms; };
+  return c;
+}
+const rankEvent = (i) => ({ itemId: `k${i}`, keyword: `kw ${i}`, previous: { position: 30, t: T0 }, current: { position: 5, videoId: `v${i}`, title: 't', t: T0 + DAY } });
+const withHeaders = (res, headers) => ({ ...res, headers: new Headers(headers) });
+
+test('delivery is paced per destination: ~1 message/s to a private chat, ~3s to a group', async () => {
+  const dir = await tmp();
+  try {
+    for (const [chatId, gap] of [['42', PACE_MS.telegramPrivate], ['-1001234567890', PACE_MS.telegramGroup], ['@mychannel', PACE_MS.telegramGroup]]) {
+      const clock = fakeClock();
+      const fetch = fakeFetch(() => response(200, { ok: true, result: {} }));
+      const m = new AlertManager({ store: new JsonStore(dir), env: { TELEGRAM_BOT_TOKEN: TOKEN, TELEGRAM_CHAT_ID: chatId }, fetch, now: clock.now, sleep: clock.sleep });
+      await m.clear();
+      for (let i = 0; i < 4; i++) await m.handleRanks({ ...rankEvent(i), itemId: `${chatId}-${i}` });
+      await m.idle();
+      assert.equal(fetch.calls.length, 4);
+      assert.deepEqual(clock.sleeps, [gap, gap, gap], `chat ${chatId}`);
+      assert.ok(gap >= 1000 && (gap === PACE_MS.telegramPrivate || gap >= 3000)); // FAQ: 1/s per chat, 20/min per group
+    }
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('a 429 is waited out (retry_after) and retried once; longer waits fail instead of blocking', async () => {
+  const dir = await tmp();
+  try {
+    const clock = fakeClock();
+    let mode = 'once';
+    let n = 0;
+    const fetch = fakeFetch(() => {
+      n++;
+      if (mode === 'once' && n === 1) return response(429, { ok: false, error_code: 429, description: 'Too Many Requests: retry after 7', parameters: { retry_after: 7 } });
+      if (mode === 'always') return response(429, { ok: false, error_code: 429, description: 'Too Many Requests', parameters: { retry_after: 5 } });
+      if (mode === 'flood') return response(429, { ok: false, error_code: 429, description: 'Too Many Requests', parameters: { retry_after: 3600 } });
+      return response(200, { ok: true, result: {} });
+    });
+    const m = new AlertManager({ store: new JsonStore(dir), env: { TELEGRAM_BOT_TOKEN: TOKEN, TELEGRAM_CHAT_ID: '42' }, fetch, now: clock.now, sleep: clock.sleep });
+    await m.handleRanks(rankEvent(1));
+    await m.idle();
+    assert.equal(fetch.calls.length, 2, 'sent again after the wait');
+    assert.deepEqual(clock.sleeps, [7000]);
+    assert.deepEqual((await m.list()).alerts[0].deliveries, [{ channel: 'telegram', ok: true }]);
+
+    mode = 'always'; fetch.calls.length = 0; clock.sleeps.length = 0;
+    await m.handleRanks(rankEvent(2));
+    await m.idle();
+    assert.equal(fetch.calls.length, 2, 'only one retry');
+    const [d] = (await m.list()).alerts[0].deliveries;
+    assert.equal(d.ok, false);
+    assert.match(d.error, /Rate limited by Telegram \(HTTP 429\): try again in 5s/);
+
+    // A flood wait of an hour: not waited out; the next queued message is skipped without another request.
+    mode = 'flood'; fetch.calls.length = 0; clock.sleeps.length = 0; clock.t += 60_000;
+    await m.handleRanks(rankEvent(3));
+    await m.handleRanks(rankEvent(4));
+    await m.idle();
+    assert.equal(fetch.calls.length, 1);
+    assert.ok(clock.sleeps.every((ms) => ms <= MAX_RATE_LIMIT_WAIT_MS));
+    const [a4, a3] = (await m.list()).alerts;
+    assert.match(a3.deliveries[0].error, /try again in 60 min/);
+    assert.match(a4.deliveries[0].error, /^Not sent: rate limited, the service asked to wait 60 min/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('Discord: retry_after in the body, Retry-After header, and an exhausted X-RateLimit bucket are respected', async () => {
+  assert.equal(retryAfterMs(null, { retry_after: 1.234 }), 1234); // Discord: seconds, may have decimals
+  assert.equal(retryAfterMs(null, { parameters: { retry_after: 3 } }), 3000); // Telegram ResponseParameters
+  assert.equal(retryAfterMs({ headers: new Headers({ 'Retry-After': '30' }) }, null), 30_000); // Slack
+  assert.equal(retryAfterMs({ headers: new Headers() }, null), 5000); // no hint: our default
+
+  const dir = await tmp();
+  try {
+    const clock = fakeClock();
+    let n = 0;
+    const fetch = fakeFetch(() => {
+      n++;
+      if (n === 1) return withHeaders(response(429, { message: 'You are being rate limited.', retry_after: 2.5, global: false }), { 'Retry-After': '3' });
+      if (n === 2) return withHeaders(response(204, ''), { 'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset-After': '4.2' });
+      return withHeaders(response(204, ''), { 'X-RateLimit-Remaining': '4', 'X-RateLimit-Reset-After': '1' });
+    });
+    const m = new AlertManager({ store: new JsonStore(dir), env: { ALERT_WEBHOOK_URL: DISCORD_URL }, fetch, now: clock.now, sleep: clock.sleep });
+    await m.handleRanks(rankEvent(1));
+    await m.handleRanks(rankEvent(2));
+    await m.idle();
+    assert.equal(fetch.calls.length, 3);
+    assert.deepEqual(clock.sleeps, [2500, 4200]); // the body's retry_after, then the bucket reset (longer than our 1.1s pace)
+    assert.ok((await m.list()).alerts.every((a) => a.deliveries[0].ok));
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('a slow destination never delays the in-app feed or the other destination', async () => {
+  const dir = await tmp();
+  try {
+    let release;
+    const hung = new Promise((r) => { release = r; });
+    const fetch = fakeFetch(async (url) => {
+      if (url === SLACK_URL) { await hung; return response(200, 'ok'); }
+      return response(200, { ok: true, result: {} });
+    });
+    const env = { TELEGRAM_BOT_TOKEN: TOKEN, TELEGRAM_CHAT_ID: '42', ALERT_WEBHOOK_URL: SLACK_URL };
+    const m = new AlertManager({ store: new JsonStore(dir), env, fetch, now: () => T0 + DAY, sleep: async () => {} });
+    const created = await m.handleSnapshot(event(twoSnapshots())); // resolves although Slack has not answered
+    assert.equal(created.length, 3);
+    assert.equal((await m.handleRanks(rankEvent(1))).length, 1, 'later events are not stuck behind delivery');
+    await waitFor(async () => fetch.calls.filter((c) => c.url.includes('telegram')).length === 4);
+    const feed = (await m.list()).alerts;
+    assert.equal(feed.length, 4);
+    await waitFor(async () => (await m.list()).alerts.every((a) => a.deliveries.find((d) => d.channel === 'telegram').ok));
+    assert.ok((await m.list()).alerts.every((a) => a.deliveries.find((d) => d.channel === 'slack').pending));
+    release();
+    await m.idle();
+    assert.ok((await m.list()).alerts.every((a) => a.deliveries.every((d) => d.ok)));
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('deliveries still queued when the server stopped are marked as not sent on the next start', async () => {
+  const dir = await tmp();
+  try {
+    const store = new JsonStore(dir);
+    await store.write('alerts', [
+      { id: 'a1', type: 'upload', title: 't', deliveries: [{ channel: 'telegram', ok: true }, { channel: 'discord', pending: true }] },
+      { id: 'a2', type: 'upload', title: 't', deliveries: [] },
+    ]);
+    const m = new AlertManager({ store: new JsonStore(dir) });
+    await m.idle();
+    const [a1, a2] = (await m.list()).alerts;
+    assert.deepEqual(a1.deliveries, [{ channel: 'telegram', ok: true }, { channel: 'discord', ok: false, error: 'Not sent: the server stopped before this alert was delivered' }]);
+    assert.deepEqual(a2.deliveries, []);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
@@ -450,9 +670,11 @@ test('demo mode marks alerts and delivered text as demo data', async () => {
   const dir = await tmp();
   try {
     const fetch = fakeFetch(() => response(200, 'ok'));
-    const m = new AlertManager({ store: new JsonStore(dir), env: { ALERT_WEBHOOK_URL: 'https://hook.example.org/x' }, demo: true, fetch, now: () => T0 + DAY });
+    const m = new AlertManager({ store: new JsonStore(dir), env: { ALERT_WEBHOOK_URL: 'https://hook.example.org/x' }, demo: true, fetch, now: () => T0 + DAY, sleep: async () => {} });
     const created = await m.handleSnapshot(event(twoSnapshots()));
     assert.ok(created.every((a) => a.demo === true));
+    await m.idle();
+    assert.equal(fetch.calls.length, 3);
     assert.ok(fetch.calls.every((c) => c.body.text.startsWith('[Demo data] ') && c.body.alert.demo === true));
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

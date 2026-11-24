@@ -278,7 +278,7 @@ test('strengthExplanation', () => {
 
 // ---------- service worker ----------
 
-function loadWorker({ settings = {}, granted = false, respond } = {}) {
+function loadWorker({ settings = {}, granted = false, respond, timers = { setTimeout, clearTimeout } } = {}) {
   let listener = null;
   const storage = { ...settings };
   const pick = (keys) => Object.fromEntries([].concat(keys).filter((k) => k in storage).map((k) => [k, storage[k]]));
@@ -299,7 +299,7 @@ function loadWorker({ settings = {}, granted = false, respond } = {}) {
     const r = await respond(url, init);
     return { ok: r.status < 400, status: r.status, text: async () => (typeof r.body === 'string' ? r.body : JSON.stringify(r.body)) };
   };
-  const ctx = vm.createContext({ chrome, fetch, URL, URLSearchParams, TextEncoder, btoa, AbortController, setTimeout, clearTimeout, console });
+  const ctx = vm.createContext({ chrome, fetch, URL, URLSearchParams, TextEncoder, btoa, AbortController, ...timers, console });
   ctx.self = ctx;
   ctx.importScripts = (f) => vm.runInContext(read(f), ctx, { filename: f });
   vm.runInContext(read('background.js'), ctx, { filename: 'background.js' });
@@ -394,4 +394,84 @@ test('worker: stores the collapsed preference', async () => {
   await w.call({ type: 'setPrefs', collapsed: true });
   assert.deepEqual(await w.call({ type: 'getPrefs' }), { ok: true, collapsed: true });
   assert.equal(w.storage.collapsed, true);
+});
+
+// ---------- review fixes ----------
+
+const OPTIONS_PAGE = { id: 'ext-id', url: 'chrome-extension://ext-id/options.html', tab: { id: 2 } };
+const YOUTUBE_TAB = { id: 'ext-id', url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', tab: { id: 1 } };
+
+test('worker: gives up before Chrome stops it (fetch() over 30s kills the service worker)', async () => {
+  const delays = [];
+  // Fire the abort timer at once, but record the delay the worker asked for.
+  const timers = { setTimeout: (fn, ms) => { delays.push(ms); return setTimeout(fn, 0); }, clearTimeout };
+  const w = loadWorker({
+    timers,
+    respond: (url, init) => new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(new Error('aborted')))),
+  });
+  const res = await w.call({ type: 'api', method: 'GET', path: '/api/demand?q=diy%20desk' });
+  assert.equal(res.ok, false);
+  assert.equal(res.kind, 'timeout');
+  assert.equal(delays.length, 1);
+  assert.ok(delays[0] < 30_000 && delays[0] >= 15_000, `timeout ${delays[0]}ms must stay under Chrome's 30s fetch limit`);
+  assert.match(res.error, new RegExp(`after ${delays[0] / 1000}s`));
+});
+
+test('messagingFailure: a reply channel Chrome closed reads as a timeout, anything else as an extension error', () => {
+  for (const msg of [
+    'A listener indicated an asynchronous response by returning true, but the message channel closed before a response was received',
+    'The message port closed before a response was received.',
+  ]) {
+    const r = L.messagingFailure(new Error(msg));
+    assert.equal(r.ok, false);
+    assert.equal(r.kind, 'timeout');
+    assert.match(r.error, /too long/);
+  }
+  assert.deepEqual(plain(L.messagingFailure(new Error('Extension context invalidated.'))), { ok: false, kind: 'extension', error: 'Extension context invalidated.' });
+  assert.equal(L.messagingFailure(null).kind, 'extension');
+  assert.ok(L.messagingFailure(null).error);
+  // Both senders map rejected messages through it.
+  assert.match(read('content.js'), /L\.messagingFailure\(e\)/);
+  assert.match(read('status.js'), /\.catch\(L\.messagingFailure\)/);
+});
+
+test('worker: "Test connection" can test unsaved settings, but only from extension pages', async () => {
+  const w = loadWorker({
+    settings: { serverUrl: 'http://localhost:3000', password: 'old' },
+    respond: () => ({ status: 200, body: { mode: 'demo' } }),
+  });
+  const override = { serverUrl: 'http://127.0.0.1:4000/', password: 'new' };
+  const res = await w.call({ type: 'api', method: 'GET', path: '/api/status', settings: override }, OPTIONS_PAGE);
+  assert.equal(res.ok, true);
+  assert.equal(res.serverUrl, 'http://127.0.0.1:4000');
+  assert.equal(w.calls[0].url, 'http://127.0.0.1:4000/api/status');
+  assert.equal(w.calls[0].init.headers.Authorization, `Basic ${Buffer.from('tubescout:new').toString('base64')}`);
+  assert.deepEqual(plain(w.storage), { serverUrl: 'http://localhost:3000', password: 'old' }, 'testing never saves');
+
+  // A content script on YouTube cannot redirect requests (or the saved password) elsewhere.
+  await w.call({ type: 'api', method: 'GET', path: '/api/status', settings: { serverUrl: 'http://127.0.0.1:9999', password: 'x' } }, YOUTUBE_TAB);
+  assert.equal(w.calls[1].url, 'http://localhost:3000/api/status');
+  assert.equal(w.calls[1].init.headers.Authorization, `Basic ${Buffer.from('tubescout:old').toString('base64')}`);
+
+  // Invalid URLs are refused, and hosts Chrome has not granted still need Save first.
+  const bad = await w.call({ type: 'api', method: 'GET', path: '/api/status', settings: { serverUrl: 'javascript:alert(1)' } }, OPTIONS_PAGE);
+  assert.equal(bad.kind, 'forbidden');
+  const remote = await w.call({ type: 'api', method: 'GET', path: '/api/status', settings: { serverUrl: 'https://scout.example.com' } }, OPTIONS_PAGE);
+  assert.equal(remote.kind, 'permission');
+  assert.equal(w.calls.length, 2);
+
+  // The options page sends the form values with the test.
+  assert.match(read('options.js'), /checkConnection\(out, \{ settings \}\)/);
+});
+
+test('"Full audit" deep link keeps the target keyword the panel scored with', () => {
+  const url = L.dashboardUrl('http://localhost:3000', { tab: 'audit', video: 'dQw4w9WgXcQ', keyword: 'mechanical keyboard' });
+  assert.equal(url, 'http://localhost:3000/#tab=audit&video=dQw4w9WgXcQ&keyword=mechanical+keyboard');
+  assert.equal(L.dashboardUrl('http://localhost:3000', { tab: 'audit', video: 'dQw4w9WgXcQ', keyword: '' }), 'http://localhost:3000/#tab=audit&video=dQw4w9WgXcQ');
+  // The Audit tab reads exactly these parameters...
+  const audit = readFileSync(path.join(EXT, '..', 'public', 'features', 'audit.js'), 'utf8');
+  assert.match(audit, /link\.get\('video'\)/);
+  assert.match(audit, /link\.get\('keyword'\)/);
+  // ...and the panel passes its keyword.
+  assert.match(read('content.js'), /tab: 'audit', video: page\.videoId, keyword: state\.keyword/);
 });

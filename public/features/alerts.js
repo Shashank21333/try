@@ -5,7 +5,7 @@ const { esc } = T;
 
 const TYPES = {
   upload: { label: 'Upload', name: 'New uploads', desc: 'A tracked channel publishes a video or Short.' },
-  breakout: { label: 'Breakout', name: 'Breakout videos', desc: 'A tracked channel’s video gains views much faster than its typical video.' },
+  breakout: { label: 'Breakout', name: 'Breakout videos', desc: 'A tracked channel’s video does far better than its typical video.' },
   milestone: { label: 'Milestone', name: 'Subscriber milestones', desc: 'A tracked channel passes 1K, 10K, 50K, 100K, 500K, 1M, 5M, 10M … subscribers.' },
   rank: { label: 'Ranking', name: 'Ranking changes', desc: 'A keyword on the Rankings tab enters the top 10, enters or leaves the top 50, or moves a lot.' },
   test: { label: 'Test', name: 'Test', desc: '' },
@@ -26,6 +26,7 @@ style.textContent = `
 .al-title a:hover { text-decoration-color: currentColor; }
 .al-msg { margin: 2px 0 6px; overflow-wrap: anywhere; }
 .al-meta { color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+.al-meta > * { min-width: 0; overflow-wrap: anywhere; } /* long remote error text must wrap, not widen the page */
 .al-meta .linkish { font-size: 12px; color: var(--muted); }
 .al-type { flex: none; display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600; padding: 2px 9px; border-radius: 999px; background: var(--surface-2); color: var(--text); min-width: 92px; margin-top: 1px; }
 .al-type::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--bar-2); flex: none; }
@@ -95,6 +96,7 @@ function alertLink(a) {
 function deliveryNote(a) {
   return (a.deliveries || []).map((d) => {
     const name = CHANNEL_NAMES[d.channel] || d.channel;
+    if (d.pending) return `<span title="Messages are spaced out to stay within the service’s rate limits">${esc(name)}: sending…</span>`;
     return d.ok
       ? `<span class="pos">${esc(name)}: sent</span>`
       : `<span class="al-err" title="${esc(d.error)}">${esc(name)}: failed${d.error ? ` (${esc(d.error)})` : ''}</span>`;
@@ -150,11 +152,11 @@ function settingsCard(s, delivery) {
     <fieldset><legend>Breakout thresholds</legend>
       <div class="al-num"><label for="al-ratio">At least</label>
         <input id="al-ratio" name="breakoutRatio" type="number" min="2" max="1000" step="0.5" value="${esc(s.breakoutRatio)}" required>
-        <span>× the channel’s typical views/day</span></div>
+        <span>× the channel’s typical video</span></div>
       <div class="al-num"><label for="al-min">and at least</label>
         <input id="al-min" name="breakoutMinViewsPerDay" type="number" min="50" max="1000000000" step="1" value="${esc(s.breakoutMinViewsPerDay)}" required>
         <span>views/day</span></div>
-      <p class="hint">Measured between daily snapshots (a brand-new video: views since it was published). Same idea as “Trending now” on the Tracking tab, which lists videos at 2×+ and 50+ views/day. One alert per video per 7 days.</p>
+      <p class="hint">TubeScout’s heuristic, not a YouTube metric. Videos over a week old: views gained per day across snapshots at least 12 hours apart vs the channel’s typical gain (like “Trending now” on the Tracking tab, which lists 2×+ and 50+ views/day). Newer videos: total views so far vs the median of the channel’s week-old-plus videos of the same format (video or Short), since every video is fastest in its first days. Needs 12+ hours of snapshots; a new upload gets its upload alert first. One alert per video per 7 days.</p>
     </fieldset>
     <fieldset><legend>Ranking changes</legend>
       <div class="al-num"><label for="al-move">Also alert when a video moves</label>
@@ -198,7 +200,7 @@ function deliveryCard(delivery) {
       <li><b>Anything else</b> (n8n, Zapier, Make, your own script): any URL that accepts a JSON POST receives <code>{ "text": …, "alert": { … } }</code>.</li>
       <li>Put it in <code>.env</code> as <code>ALERT_WEBHOOK_URL=…</code> and restart TubeScout. Discord and Slack URLs are detected automatically.</li>
     </ol></details>
-    <p class="hint">Tokens and webhook URLs are secrets: they stay in <code>.env</code> on the server and are never shown here. Messages are plain text; Discord messages cannot ping @everyone.</p>
+    <p class="hint">Tokens and webhook URLs are secrets: they stay in <code>.env</code> on the server and are never shown here. Messages are plain text (Discord: formatting characters in video titles are escaped) and cannot ping @everyone. To stay within each service’s rate limits, messages are sent one at a time, about one per second (about one every 3 seconds to a Telegram group), so a busy snapshot can take a minute to arrive.</p>
   </div>`;
   const test = `<div class="al-save" style="margin-top:12px">
       <button class="ghost" id="al-test"${anyConfigured ? '' : ' disabled'}>Send test message</button>

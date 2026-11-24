@@ -6,7 +6,7 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import {
   findPositions, topResults, rankChange, rankReport, checksInWindow, itemId, isItemId, normalizeKeyword,
-  RankTracker, MAX_ITEMS, MAX_HISTORY, DUE_AFTER_MS,
+  searchDepth, isConclusive, RankTracker, MAX_ITEMS, MAX_HISTORY, DUE_AFTER_MS,
 } from '../src/ranks.js';
 import { create } from '../src/features/ranks.js';
 import { JsonStore } from '../src/store.js';
@@ -112,7 +112,7 @@ test('rankReport: deltas vs previous and ~7 days ago, best, days tracked (fake c
   assert.equal(r.firstChecked, T0);
   assert.equal(r.due, false);
   assert.equal(r.series.length, 11);
-  assert.deepEqual(r.series[2], { t: T0 + 2 * DAY, position: null });
+  assert.deepEqual(r.series[2], { t: T0 + 2 * DAY, position: null, resultCount: 50 });
 
   // Only 5 days of history: no 7-day comparison yet.
   const short = rankReport(item, hist.slice(0, 6), T0 + 5 * DAY);
@@ -126,6 +126,52 @@ test('rankReport: deltas vs previous and ~7 days ago, best, days tracked (fake c
 
   // Due once the last check is older than 20h.
   assert.equal(rankReport(item, hist, T0 + 10 * DAY + DUE_AFTER_MS).due, true);
+});
+
+test('findPositions/searchDepth use the original search rank when the client dropped a hit', () => {
+  // Rank 3 was dropped (e.g. a video made private since YouTube indexed it): ME at rank 4 stays #4.
+  const ranked = results([4, 9]).map((v, i) => ({ ...v, searchRank: i + 1 })).filter((v) => v.searchRank !== 3);
+  assert.equal(ranked.length, 49);
+  assert.deepEqual(findPositions(ranked, ME), { position: 4, positions: [4, 9], videoId: 'v4', title: 'Video v4' });
+  assert.equal(searchDepth(ranked), 50);
+  // Without searchRank (DemoClient, older clients) the array index is the rank.
+  assert.equal(searchDepth(results([], 41)), 41);
+  assert.equal(searchDepth([]), 0);
+  assert.equal(searchDepth(undefined), 0);
+});
+
+test('isConclusive: a miss only counts as "not in top 50" on a full page', () => {
+  assert.equal(isConclusive({ position: 7, resultCount: 12 }), true);
+  assert.equal(isConclusive({ position: null, resultCount: 50 }), true);
+  assert.equal(isConclusive({ position: null, resultCount: 41 }), false);
+  assert.equal(isConclusive({ position: null, resultCount: 0 }), false);
+  assert.equal(isConclusive({ position: null }), true, 'older entries without a count');
+  assert.equal(isConclusive(null), false);
+  // A short page without the channel is never a drop.
+  assert.equal(rankChange({ t: 1, position: 5, resultCount: 50 }, { t: 2, position: null, resultCount: 41 }).dir, 'unknown');
+  assert.equal(rankChange({ t: 1, position: 5, resultCount: 50 }, { t: 2, position: null, resultCount: 0 }).dir, 'unknown');
+  assert.equal(rankChange({ t: 1, position: null, resultCount: 41 }, { t: 2, position: 3, resultCount: 50 }).dir, 'unknown');
+  assert.equal(rankChange({ t: 1, position: 5, resultCount: 50 }, { t: 2, position: null, resultCount: 50 }).dir, 'dropped');
+});
+
+test('rankReport skips inconclusive checks when computing changes', () => {
+  const h = (d, position, resultCount = 50) => ({ t: T0 + d * DAY, position, positions: position ? [position] : [], videoId: null, title: null, resultCount, top3: [] });
+  const item = { id: 'abcdefabcdef', keyword: 'kw', channelId: ME, channelTitle: 'Me', addedAt: '' };
+  // #5, then a short page (41 results, not found), then #8: "vs last" compares #8 with #5.
+  const r = rankReport(item, [h(0, 5), h(1, null, 41), h(2, 8)], T0 + 2 * DAY);
+  assert.deepEqual(r.change, { from: 5, to: 8, since: T0, places: -3, dir: 'down' });
+  assert.deepEqual(r.series.map((p) => p.resultCount), [50, 41, 50]);
+  // Latest check is the short page: position unknown, not a drop.
+  const u = rankReport(item, [h(0, 5), h(7, null, 41)], T0 + 7 * DAY);
+  assert.equal(u.position, null);
+  assert.equal(u.resultCount, 41);
+  assert.equal(u.change.dir, 'unknown');
+  assert.equal(u.change7d.dir, 'unknown');
+  // Only inconclusive checks before the latest: nothing to compare with.
+  assert.equal(rankReport(item, [h(0, null, 0), h(1, 4)], T0 + DAY).change, null);
+  // The 7-day comparison also skips inconclusive checks.
+  const w = rankReport(item, [h(0, 20), h(1, null, 30), h(8, 10)], T0 + 8 * DAY);
+  assert.deepEqual(w.change7d, { from: 20, to: 10, since: T0, places: 10, dir: 'up' });
 });
 
 test('rankReport: never checked and never found', () => {
@@ -196,12 +242,12 @@ test("'ranks' event payload after every check", async (t) => {
     {
       itemId: item.id, keyword: 'budget phone', region: 'GB', channelId: ME, channelTitle: 'My Channel',
       previous: { position: null, t: null },
-      current: { position: 9, videoId: 'v9', title: 'Video v9', t: T0 },
+      current: { position: 9, videoId: 'v9', title: 'Video v9', t: T0, resultCount: 50 },
     },
     {
       itemId: item.id, keyword: 'budget phone', region: 'GB', channelId: ME, channelTitle: 'My Channel',
       previous: { position: 9, t: T0 },
-      current: { position: null, videoId: null, title: null, t: T0 + DAY },
+      current: { position: null, videoId: null, title: null, t: T0 + DAY, resultCount: 50 },
     },
   ]);
   assert.deepEqual(client.searches[0], { q: 'budget phone', max: 50, regionCode: 'GB' });
@@ -298,6 +344,40 @@ test('start() runs due checks on an unref\'d hourly timer', async (t) => {
   rt.stop();
   mock.timers.tick(5 * HOUR);
   assert.equal(runs, 3);
+});
+
+test('short or empty result pages are recorded but never emitted as a drop', async (t) => {
+  const store = await tempStore(t);
+  const c = clock();
+  const events = new EventEmitter();
+  const seen = [];
+  events.on('ranks', (e) => seen.push(e));
+  const pages = [results([6]), results([], 41), [], results([30, 31], 45), results([])];
+  let call = 0;
+  const client = fakeClient({ kw: () => pages[call++] });
+  const rt = new RankTracker({ client, store, events, now: c.now });
+  const item = await rt.add({ keyword: 'kw', channel: { id: ME, title: 'My Channel' } });
+
+  const first = await rt.check(item); // #6 (first check)
+  c.advance(DAY);
+  const short = await rt.check(item); // 41 results, not found -> unknown, no event
+  assert.equal(short.resultCount, 41);
+  assert.equal(short.position, null);
+  c.advance(DAY);
+  const empty = await rt.check(item); // no results -> recorded (not retried hourly), no event
+  assert.equal(empty.resultCount, 0);
+  assert.equal((await rt.report(item.id)).due, false);
+  c.advance(DAY);
+  await rt.check(item); // #30 on a 45-result page: a found position is conclusive
+  c.advance(DAY);
+  await rt.check(item); // full page without the channel: a real drop
+  assert.equal(seen.length, 3);
+  assert.deepEqual(seen.map((e) => [e.previous, e.current.position, e.current.resultCount]), [
+    [{ position: null, t: null }, 6, 50],
+    [{ position: 6, t: first.t }, 30, 45], // compared with the last conclusive check, not the short pages
+    [{ position: 30, t: T0 + 3 * DAY }, null, 50],
+  ]);
+  assert.equal((await rt.history(item.id)).length, 5);
 });
 
 // ---------------------------------------------------------------- routes
@@ -417,4 +497,14 @@ test('POST /api/ranks/remove', async (t) => {
   await assert.rejects(call('POST /api/ranks/remove', { id: item.id }), { status: 404 });
   await assert.rejects(call('POST /api/ranks/remove', { id: '../tracked' }), { status: 400 });
   await assert.rejects(call('POST /api/ranks/remove', {}), { status: 400 });
+});
+
+test('POST routes answer 400 (not a 500 TypeError) for JSON bodies that are not objects', async (t) => {
+  const { call, client } = await setup(t);
+  for (const route of ['POST /api/ranks', 'POST /api/ranks/check', 'POST /api/ranks/remove']) {
+    for (const body of [null, [], 42, 'id', true]) {
+      await assert.rejects(call(route, body), (e) => e.status === 400 && /JSON object/.test(e.message), `${route} ${JSON.stringify(body)}`);
+    }
+  }
+  assert.equal(client.searches.length, 0);
 });
