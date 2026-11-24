@@ -136,6 +136,9 @@ export class YouTubeClient {
     const r = await this.request('search', {
       part: 'snippet', type: 'video', q, order, maxResults: Math.min(50, max), regionCode, relevanceLanguage,
     }, 100);
-    return this.getVideos((r.items || []).map((i) => i.id.videoId).filter(Boolean));
+    const ids = (r.items || []).map((i) => i.id.videoId).filter(Boolean);
+    // videos.list does not promise to return items in the requested order; restore search-rank order.
+    const byId = new Map((await this.getVideos(ids)).map((v) => [v.id, v]));
+    return ids.map((id) => byId.get(id)).filter(Boolean);
   }
 }

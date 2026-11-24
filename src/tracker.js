@@ -10,11 +10,12 @@ const VIDEOS_PER_SNAPSHOT = 30;
 const snapKey = (id) => `snap-${id.replace(/[^\w-]/g, '')}`;
 
 export class Tracker {
-  constructor({ client, store, now = () => Date.now(), log = () => {} }) {
+  constructor({ client, store, now = () => Date.now(), log = () => {}, onSnapshot = null }) {
     this.client = client;
     this.store = store;
     this.now = now;
     this.log = log;
+    this.onSnapshot = onSnapshot; // ({ channel, snapshots, report }) after every snapshot (used by alerts)
     this.running = null;
   }
 
@@ -64,11 +65,17 @@ export class Tracker {
         comments: v.comments, isShort: v.isShort, thumbnail: v.thumbnail,
       })),
     };
-    await this.store.update(snapKey(id), [], (list) => [...list, snap].slice(-MAX_SNAPSHOTS));
+    const all = await this.store.update(snapKey(id), [], (list) => [...list, snap].slice(-MAX_SNAPSHOTS));
     // keep display info fresh
     await this.store.update('tracked', [], (list) => list.map((c) => (c.id === id
       ? { ...c, title: raw.snippet?.title || c.title, thumbnail: raw.snippet?.thumbnails?.default?.url || c.thumbnail }
       : c)));
+    if (this.onSnapshot) {
+      try {
+        const channel = (await this.list()).find((c) => c.id === id) || { id, title: raw.snippet?.title || id };
+        await this.onSnapshot({ channel, snapshots: all, report: channelReport(all) });
+      } catch (e) { this.log(`onSnapshot hook failed: ${e.message}`); }
+    }
     return snap;
   }
 

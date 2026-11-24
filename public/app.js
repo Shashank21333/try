@@ -644,20 +644,65 @@ async function loadMe() {
   } catch (err) { out.innerHTML = errorBox(err.message); }
 }
 
-// ---------- init ----------
+// ---------- feature tabs (public/features/*.js) ----------
 const loaders = { tracking: loadTracking, me: loadMe };
+
+/**
+ * Register a feature tab. opts: { id, label, before?: tabId, onShow(container) }.
+ * Creates the nav button and <section id="tab-{id}"><div id="out-{id}"></div></section>.
+ * onShow runs every time the tab is opened; it may return a Promise.
+ */
+function registerTab({ id, label, before, onShow }) {
+  if (!/^[a-z][\w-]*$/.test(id) || document.getElementById(`tab-${id}`)) throw new Error(`Bad or duplicate tab id: ${id}`);
+  const btn = document.createElement('button');
+  btn.setAttribute('role', 'tab');
+  btn.dataset.tab = id;
+  btn.setAttribute('aria-selected', 'false');
+  btn.textContent = label;
+  const nav = document.querySelector('.tabs');
+  const ref = before ? nav.querySelector(`[data-tab="${before}"]`) : null;
+  nav.insertBefore(btn, ref);
+  const section = document.createElement('section');
+  section.id = `tab-${id}`;
+  section.className = 'tab-panel';
+  section.hidden = true;
+  section.innerHTML = `<div id="out-${id}"></div>`;
+  const refSection = before ? document.getElementById(`tab-${before}`) : null;
+  document.querySelector('main').insertBefore(section, refSection);
+  btn.addEventListener('click', () => setTab(id));
+  if (onShow) loaders[id] = () => onShow(document.getElementById(`out-${id}`));
+  btn.addEventListener('click', () => loaders[id]?.());
+}
+
+// Shared helpers for feature modules (they are plain ES modules loaded below).
+window.TubeScout = {
+  $, esc, n, pct, fx, num, ago, dur, signed, shortDate, safeImg, ytVideo, ytChannel,
+  card, kpi, hbars, columns, lineChart, videoGrid, keywordTable, tagCloud, titlePatternTable,
+  loading, errorBox, api, apiPost, download, toCsv, makeSortable, store, state, setTab, registerTab,
+  goToKeyword(q) { setTab('keyword'); $('#keyword-input').value = q; $('#form-keyword').requestSubmit(); },
+};
+
+const FEATURE_MODULES = ['./features/ai.js', './features/audit.js', './features/ranks.js', './features/alerts.js'];
+
+// ---------- init ----------
 document.querySelectorAll('.tabs button').forEach((b) => b.addEventListener('click', () => loaders[b.dataset.tab]?.()));
 
 $('#compare-input').value = store.get('compare') || '';
 $('#channel-input').value = store.get('channel') || '';
 $('#keyword-input').value = store.get('keyword') || '';
 
-const hashErr = /^#me-error=(.*)$/.exec(location.hash);
-let initialTab = store.get('tab') || 'compare';
-if (location.hash.startsWith('#me')) initialTab = 'me';
-setTab(initialTab);
-loaders[initialTab]?.().then(() => {
+(async () => {
+  // A broken feature module must not take the whole app down.
+  for (const m of FEATURE_MODULES) {
+    try { await import(m); } catch (err) { console.error(`Failed to load ${m}:`, err); }
+  }
+  const hashErr = /^#me-error=(.*)$/.exec(location.hash);
+  let initialTab = store.get('tab') || 'compare';
+  if (!document.getElementById(`tab-${initialTab}`)) initialTab = 'compare';
+  if (location.hash.startsWith('#me')) initialTab = 'me';
+  setTab(initialTab);
+  await Promise.resolve(loaders[initialTab]?.()).catch(() => {});
   if (hashErr) $('#out-me').insertAdjacentHTML('afterbegin', errorBox(`Google sign-in failed: ${decodeURIComponent(hashErr[1])}`));
   if (location.hash) history.replaceState(null, '', location.pathname);
-});
+})();
 api('status', {}).then(updateMeta).catch(() => {});

@@ -12,6 +12,8 @@ import { JsonStore } from './src/store.js';
 import { Tracker } from './src/tracker.js';
 import { GoogleOAuth } from './src/oauth.js';
 import { ChannelAnalytics } from './src/ytanalytics.js';
+import { EventEmitter } from 'node:events';
+import { FEATURES } from './src/features/index.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(ROOT, 'public');
@@ -35,7 +37,8 @@ const isLoopback = ['127.0.0.1', 'localhost', '::1'].includes(HOST);
 
 const client = DEMO ? new DemoClient() : new YouTubeClient(env.YOUTUBE_API_KEY);
 const store = new JsonStore(path.resolve(ROOT, env.DATA_DIR || 'data'));
-const tracker = new Tracker({ client, store, log: (m) => console.warn(m) });
+const events = new EventEmitter(); // 'snapshot' (tracker) and 'ranks' (rank tracker) events; alerts subscribe
+const tracker = new Tracker({ client, store, log: (m) => console.warn(m), onSnapshot: (e) => { events.emit('snapshot', e); } });
 const oauth = new GoogleOAuth({
   clientId: env.GOOGLE_CLIENT_ID,
   clientSecret: env.GOOGLE_CLIENT_SECRET,
@@ -92,6 +95,8 @@ const meta = () => ({
     trends: Boolean(env.SERPAPI_KEY),
     volume: Boolean(env.KE_API_KEY),
     oauth: oauth.configured,
+    ai: Boolean(env.ANTHROPIC_API_KEY || env.AI_ENABLED === '1'),
+    alerts: Boolean(env.TELEGRAM_BOT_TOKEN || env.ALERT_WEBHOOK_URL),
   },
 });
 
@@ -158,6 +163,21 @@ const routes = {
   'POST /auth/logout': async (url, req) => { await readJson(req); await oauth.disconnect(); return { ok: true }; },
 };
 
+// ---- Feature modules (src/features/*.js) plug in their own routes and background jobs ----
+const ctx = {
+  env, DEMO, client, store, tracker, oauth, channelAnalytics, events, meta,
+  readJson, httpError, intParam, regionParam, log: (...a) => console.warn(...a),
+};
+const features = [];
+for (const create of FEATURES) {
+  const f = await create(ctx);
+  for (const [key, handler] of Object.entries(f.routes || {})) {
+    if (routes[key]) throw new Error(`Feature route collides with an existing route: ${key}`);
+    routes[key] = handler;
+  }
+  features.push(f);
+}
+
 async function serveStatic(url, res) {
   const rel = url.pathname === '/' ? 'index.html' : decodeURIComponent(url.pathname).replace(/^\/+/, '');
   const file = path.resolve(PUBLIC, rel);
@@ -216,4 +236,5 @@ const runSnapshots = () => tracker.runDue().catch((e) => console.warn('Snapshot 
 if (env.DISABLE_SCHEDULER !== '1') {
   setTimeout(runSnapshots, 10_000).unref();
   setInterval(runSnapshots, 3600_000).unref();
+  for (const f of features) f.start?.();
 }
