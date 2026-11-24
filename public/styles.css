@@ -126,3 +126,20 @@ tr.me td { background: color-mix(in srgb, var(--accent) 8%, transparent); }
   .brand .sub { display: none; }
   button.primary { margin-left: 0; width: 100%; }
 }
+
+/* line charts */
+.line { display: grid; grid-template-columns: auto 1fr; grid-template-rows: auto auto; gap: 2px 8px; }
+.line svg { width: 100%; height: 140px; display: block; grid-column: 2; grid-row: 1; background: linear-gradient(var(--border), var(--border)) bottom / 100% 1px no-repeat; }
+.line-y { grid-column: 1; grid-row: 1; display: flex; flex-direction: column; justify-content: space-between; font-size: 11px; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+.line-x { grid-column: 2; grid-row: 2; display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); }
+
+.sub-h { font-size: 13px; margin: 0 0 8px; }
+.gauge .note { color: var(--muted); font-size: 12px; margin-top: 6px; }
+.badge { display: inline-block; background: var(--accent); color: var(--accent-ink); border-radius: 4px; font-size: 10.5px; padding: 0 5px; margin-left: 4px; vertical-align: middle; }
+.linkish { background: none; border: 0; padding: 0; color: inherit; font: inherit; text-decoration: underline; text-decoration-color: var(--border); text-underline-offset: 3px; cursor: pointer; text-align: left; }
+.linkish:hover { text-decoration-color: currentColor; }
+.tag.idea { cursor: pointer; }
+.tag.idea:hover { outline: 1px solid var(--border); }
+.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
+.steps code { word-break: break-all; }
+a.btn-link { display: inline-block; text-decoration: none; margin-left: 0; background: var(--accent); color: var(--accent-ink); padding: 9px 18px; border-radius: 8px; font-weight: 600; }

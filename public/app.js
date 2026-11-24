@@ -22,6 +22,39 @@ const ytVideo = (id) => `https://www.youtube.com/watch?v=${encodeURIComponent(id
 const ytChannel = (id) => `https://www.youtube.com/channel/${encodeURIComponent(id)}`;
 const safeImg = (u) => (typeof u === 'string' && /^(https:|data:image\/svg\+xml)/.test(u) ? esc(u) : '');
 
+const state = { meta: null };
+
+async function apiPost(path, body) {
+  const res = await fetch(path.startsWith('/') ? path : `/api/${path}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}),
+  });
+  const json = await res.json().catch(() => ({ error: `Request failed (${res.status})` }));
+  if (!res.ok) throw new Error(json.error || `Request failed (${res.status})`);
+  return json;
+}
+
+const shortDate = (t) => new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+const signed = (x, f = n) => (x === null || x === undefined || !Number.isFinite(x) ? '—' : `${x > 0 ? '+' : x < 0 ? '−' : ''}${f(Math.abs(x))}`);
+
+/** Minimal responsive SVG line chart. points: [{t, v}] */
+function lineChart(points, { fmtY = n, fmtX = shortDate, label = 'chart', height = 140, minZero = false } = {}) {
+  const pts = points.filter((p) => Number.isFinite(p.v) && Number.isFinite(p.t));
+  if (pts.length < 2) return '<p class="muted">Not enough data points yet. Check back after the next snapshot.</p>';
+  const xs = pts.map((p) => p.t), ys = pts.map((p) => p.v);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  const y0 = minZero ? Math.min(0, ...ys) : Math.min(...ys), y1 = Math.max(...ys);
+  const W = 600, H = height, pad = 6;
+  const sx = (t) => (x1 === x0 ? W / 2 : ((t - x0) / (x1 - x0)) * W);
+  const sy = (v) => (y1 === y0 ? H / 2 : H - pad - ((v - y0) / (y1 - y0)) * (H - 2 * pad));
+  const d = pts.map((p) => `${sx(p.t).toFixed(1)},${sy(p.v).toFixed(1)}`).join(' ');
+  const area = `0,${H} ${d} ${W},${H}`;
+  return `<div class="line"><div class="line-y"><span>${fmtY(y1)}</span><span>${fmtY(y0)}</span></div>
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${esc(label)}">
+      <polygon points="${area}" fill="var(--bar)" opacity=".08"/>
+      <polyline points="${d}" fill="none" stroke="var(--bar)" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>
+    </svg><div class="line-x"><span>${fmtX(x0)}</span><span>${fmtX(x1)}</span></div></div>`;
+}
+
 const store = {
   get(k) { try { return localStorage.getItem(`tubescout:${k}`); } catch { return null; } },
   set(k, v) { try { localStorage.setItem(`tubescout:${k}`, v); } catch { /* ignore */ } },
@@ -44,6 +77,7 @@ async function api(path, params) {
 
 function updateMeta(meta) {
   $('#demo-banner').hidden = meta.mode !== 'demo';
+  state.meta = meta;
   $('#quota').textContent = meta.mode === 'live' ? `API quota used by this server since start: ~${meta.quotaUsedSinceStart} units.` : '';
 }
 
@@ -166,7 +200,7 @@ function renderCompare(data) {
   return `
     ${data.errors.map((e) => errorBox(`Couldn't load "${e.input}": ${e.message}`)).join('')}
     ${card('Head-to-head', 'Your channel is highlighted. All stats are calculated from recent uploads, not lifetime totals, except subscribers and video count.', table,
-      `<button class="ghost" id="dl-compare">Export videos CSV</button>`)}
+      `<div class="row" style="margin:0"><button class="ghost" id="track-all" data-ids="${esc(JSON.stringify(ch.map((c) => c.id)))}">Track these channels daily</button><button class="ghost" id="dl-compare">Export videos CSV</button></div>`)}
     <div class="grid-2">
       ${card('Median views per video', '', bar('medianViews', n))}
       ${card('Uploads per week (last 90 days)', '', bar('uploadsPerWeek', (x) => num(x)))}
@@ -310,14 +344,89 @@ $('#form-channel').addEventListener('submit', (e) => {
   });
 });
 
+// ---------- Search demand (Keyword tab) ----------
+function renderDemand(d) {
+  const ac = d.autocomplete || {};
+  const acCard = ac.error ? errorBox(`YouTube autocomplete: ${ac.error}`) : `
+    <div class="gauge"><div class="label">Autocomplete strength (YouTube)</div>
+      <div class="value">${ac.strength ?? 0}<span class="muted" style="font-size:14px">/100</span></div>
+      <div class="track"><div style="width:${ac.strength ?? 0}%"></div></div>
+      <div class="note">${ac.found
+        ? `YouTube suggests it after typing <b>“${esc(ac.prefix)}”</b> (${ac.prefixLength} of ${ac.keywordLength} characters), at position #${ac.position}. The earlier it appears, the more people search it.`
+        : 'Not suggested by YouTube even when typed in full: very few people search this exact phrase.'}</div></div>`;
+
+  const vol = d.volume || {};
+  const volById = new Map((vol.items || []).map((i) => [i.keyword, i]));
+  const main = volById.get(d.keyword);
+  const volCard = !vol.enabled
+    ? `<div class="gauge"><div class="label">Monthly searches (Google)</div><div class="value muted">—</div><div class="note">Add <code>KE_API_KEY</code> (Keywords Everywhere) to show Google Keyword Planner volume, CPC and competition.</div></div>`
+    : vol.error ? errorBox(vol.error)
+      : `<div class="gauge"><div class="label">Monthly searches (Google, ${esc((vol.country || '').toUpperCase())})</div>
+          <div class="value">${main ? n(main.volume) : '—'}</div>
+          <div class="note">${main ? `CPC ${main.cpcCurrency || ''}${num(main.cpc, 2)} · competition ${num(main.competition, 2)}` : 'No data for this phrase'}${vol.creditsLeft !== null ? ` · ${n(vol.creditsLeft)} credits left` : ''}</div></div>`;
+
+  const tr = d.trends || {};
+  const trendLink = `<a href="${esc(tr.url)}" target="_blank" rel="noopener">Open in Google Trends (YouTube Search)</a>`;
+  let trendBody;
+  if (!tr.enabled) trendBody = `<p class="desc">Add <code>SERPAPI_KEY</code> to chart 12 months of YouTube-search interest here. Meanwhile: ${trendLink}.</p>`;
+  else if (tr.error) trendBody = errorBox(tr.error) + `<p class="desc">${trendLink}</p>`;
+  else if (tr.noData) trendBody = `<p class="desc">Google Trends has too little YouTube search data for this phrase. That usually means low search interest. ${trendLink}</p>`;
+  else {
+    const chg = tr.change;
+    trendBody = `<p class="desc">Relative interest in YouTube Search, 0–100 (100 = peak in the period). Last 3 months vs the 3 before:
+      <b class="${chg > 0.05 ? 'pos' : chg < -0.05 ? 'neg' : ''}">${chg === null ? '—' : signed(chg * 100, (x) => `${x.toFixed(0)}%`)}</b>. ${trendLink}</p>
+      ${lineChart(tr.timeline.map((p) => ({ t: p.timestamp, v: p.value })), { fmtY: (x) => x.toFixed(0), label: 'YouTube search interest', minZero: true })}
+      ${tr.rising?.length ? `<p class="desc" style="margin-top:12px"><b>Rising related searches</b></p>${tr.rising.map((r) => `<span class="tag idea" data-kw="${esc(r.query)}">${esc(r.query)}<b>${esc(r.label)}</b></span>`).join('')}` : ''}
+      ${tr.top?.length ? `<p class="desc" style="margin-top:8px"><b>Top related searches</b></p>${tr.top.map((r) => `<span class="tag idea" data-kw="${esc(r.query)}">${esc(r.query)}<b>${r.value}</b></span>`).join('')}` : ''}`;
+  }
+
+  const ideas = Array.isArray(d.ideas) ? d.ideas : [];
+  const ideaRows = (list) => list.map((i) => {
+    const v = volById.get(i.keyword);
+    return `<tr><td class="l wrap"><button class="linkish idea" data-kw="${esc(i.keyword)}">${esc(i.keyword)}</button></td><td>${i.appearances}</td><td>#${i.bestPosition}</td>${vol.enabled ? `<td>${v ? n(v.volume) : '—'}</td><td>${v && v.cpc !== null ? num(v.cpc, 2) : '—'}</td>` : ''}</tr>`;
+  }).join('');
+  const ideaTable = (list) => (list.length ? `<div class="table-wrap"><table><thead><tr><th class="l">Keyword</th><th title="How many autocomplete lookups surfaced it">Seen in</th><th>Best position</th>${vol.enabled ? '<th>Google searches/mo</th><th>CPC</th>' : ''}</tr></thead><tbody>${ideaRows(list)}</tbody></table></div>` : '<p class="muted">None found.</p>');
+  const ideasBody = d.ideas?.error ? errorBox(d.ideas.error) : `<div class="grid-2">
+      <div><h3 class="sub-h">Questions people ask</h3>${ideaTable(ideas.filter((i) => i.type === 'question').slice(0, 25))}</div>
+      <div><h3 class="sub-h">Long-tail phrases</h3>${ideaTable(ideas.filter((i) => i.type !== 'question').slice(0, 40))}</div></div>`;
+
+  return `${card(`Search demand: “${d.keyword}”`, 'YouTube does not publish search volume, so no tool has exact YouTube numbers. These are real signals, each labelled with its source.',
+      `<div class="gauges">${acCard}${volCard}</div>`, '<button class="ghost" id="dl-ideas">Export ideas CSV</button>')}
+    ${card('YouTube search interest over time', 'Source: Google Trends, “YouTube Search” property.', trendBody)}
+    ${card('Keyword ideas from YouTube autocomplete', 'Real searches people type into YouTube, found by expanding your keyword with a–z, question words and modifiers. Click one to research it.', ideasBody)}`;
+}
+
+function wireIdeas(root, data) {
+  root.querySelectorAll('.idea').forEach((el) => el.addEventListener('click', () => {
+    $('#keyword-input').value = el.dataset.kw;
+    $('#form-keyword').requestSubmit();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }));
+  $('#dl-ideas')?.addEventListener('click', () => {
+    const vol = new Map((data.volume?.items || []).map((i) => [i.keyword, i]));
+    const rows = Array.isArray(data.ideas) ? data.ideas : [];
+    download(`ideas-${data.keyword.replace(/[^\w-]+/g, '_')}.csv`, toCsv(rows, [
+      { head: 'keyword', get: (i) => i.keyword }, { head: 'type', get: (i) => i.type }, { head: 'seen_in', get: (i) => i.appearances },
+      { head: 'best_position', get: (i) => i.bestPosition }, { head: 'google_monthly_searches', get: (i) => vol.get(i.keyword)?.volume ?? '' },
+      { head: 'cpc', get: (i) => vol.get(i.keyword)?.cpc ?? '' },
+    ]));
+  });
+}
+
 $('#form-keyword').addEventListener('submit', (e) => {
   e.preventDefault();
   const q = $('#keyword-input').value.trim();
   const out = $('#out-keyword');
+  const outD = $('#out-demand');
   if (!q) { out.innerHTML = errorBox('Enter a keyword.'); return; }
   store.set('keyword', q);
+  const region = $('#keyword-region').value.trim().toUpperCase();
+  outD.innerHTML = loading('Checking YouTube autocomplete and search demand…');
+  api('demand', { q, region, hl: $('#keyword-hl').value })
+    .then((d) => { outD.innerHTML = renderDemand(d); wireIdeas(outD, d); })
+    .catch((err) => { outD.innerHTML = errorBox(`Search demand: ${err.message}`); });
   run(e.target, out, 'Searching YouTube…', async () => {
-    const data = await api('keyword', { q, region: $('#keyword-region').value.trim().toUpperCase() });
+    const data = await api('keyword', { q, region });
     out.innerHTML = renderKeyword(data);
     const rowFn = (v) => `<tr><td>${v.rank}</td><td class="l wrap"><a href="${ytVideo(v.id)}" target="_blank" rel="noopener">${esc(v.title)}</a></td><td class="l">${esc(v.channelTitle)}</td><td>${n(v.channelSubscribers)}</td><td>${n(v.views)}</td><td>${n(v.viewsPerDay)}</td><td>${ago(v.ageDays)}</td><td class="${v.viewsToSubs >= 1 ? 'pos' : ''}">${fx(v.viewsToSubs, 2)}</td></tr>`;
     makeSortable($('#kw-table'), data.videos, rowFn);
@@ -334,9 +443,221 @@ $('#form-keyword').addEventListener('submit', (e) => {
   });
 });
 
-// restore last inputs
+// ---------- Tracking tab ----------
+function deltaCell(dl, key, f = n) {
+  if (!dl || dl[key] === null || dl[key] === undefined) return '<td class="muted">—</td>';
+  const v = dl[key];
+  const note = dl.partial ? ` title="Only ${Math.max(1, Math.round((Date.now() - dl.sinceT) / 86400000))} day(s) of history so far (since ${shortDate(dl.sinceT)})"` : '';
+  return `<td class="${v > 0 ? 'pos' : v < 0 ? 'neg' : ''}"${note}>${signed(v, f)}${dl.partial ? '*' : ''}</td>`;
+}
+
+function renderTracking(d) {
+  if (!d.channels.length) return `<div class="state">You're not tracking any channels yet. Add your channel and your competitors above, or use “Track these channels” on the Competitors tab.</div>`;
+  const rows = d.channels.map((c) => `<tr>
+      <td><a class="chip" href="${ytChannel(c.id)}" target="_blank" rel="noopener">${safeImg(c.thumbnail) ? `<img src="${safeImg(c.thumbnail)}" alt="">` : ''}${esc(c.title)}</a></td>
+      <td>${n(c.subscribers)}</td>${deltaCell(c.d1, 'subs')}${deltaCell(c.d7, 'subs')}${deltaCell(c.d30, 'subs')}
+      <td>${c.d7?.viewsPerDay != null ? n(c.d7.viewsPerDay) : '—'}</td>${deltaCell(c.d30, 'views')}${deltaCell(c.d30, 'videos', (x) => String(x))}
+      <td>${c.snapshots || 0}</td><td>${c.lastT ? ago((Date.now() - c.lastT) / 86400000) : '—'}</td>
+      <td><button class="ghost untrack" data-id="${esc(c.id)}" aria-label="Stop tracking ${esc(c.title)}">Remove</button></td></tr>`).join('');
+  const table = `<div class="table-wrap"><table><thead><tr><th class="l">Channel</th><th>Subscribers</th><th>Subs 24h</th><th>Subs 7d</th><th>Subs 30d</th>
+      <th>Views/day (7d)</th><th>Views 30d</th><th>Uploads 30d</th><th>Snapshots</th><th>Last snapshot</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+      <p class="hint">* = less history than the period so far. Subscriber counts are rounded by YouTube (3 significant figures), so small daily changes can show as 0.</p>`;
+
+  const trending = d.trending.length ? `<div class="table-wrap"><table><thead><tr><th class="l">Video</th><th class="l">Channel</th><th>Views/day now</th><th>Channel typical</th><th>Ratio</th></tr></thead><tbody>
+      ${d.trending.map((v) => `<tr><td class="l wrap"><a href="${ytVideo(v.id)}" target="_blank" rel="noopener">${esc(v.title)}</a>${v.isNew ? ' <span class="badge">new</span>' : ''}</td><td class="l">${esc(v.channelTitle)}</td>
+        <td>${n(v.gainPerDay)}</td><td>${n(v.typicalGainPerDay)}</td><td class="pos">${fx(v.ratio)}</td></tr>`).join('')}</tbody></table></div>`
+    : '<p class="muted">Nothing is spiking right now. This needs at least two snapshots 12+ hours apart.</p>';
+
+  const uploads = d.newUploads.length ? `<div class="videos">${d.newUploads.map((v) => `
+      <a class="vid" href="${ytVideo(v.id)}" target="_blank" rel="noopener">${safeImg(v.thumbnail) ? `<img loading="lazy" src="${safeImg(v.thumbnail)}" alt="">` : ''}
+        <div class="body"><div class="t">${esc(v.title)}</div><div class="m"><span>${esc(v.channelTitle)}</span><span>${ago((Date.now() - Date.parse(v.publishedAt)) / 86400000)}</span></div>
+        <div class="m"><span>${n(v.views)} views${v.isShort ? ' · Short' : ''}</span><span>${n(v.viewsPerDay)}/day</span></div></div></a>`).join('')}</div>`
+    : '<p class="muted">No uploads in the last 7 days.</p>';
+
+  const charts = d.channels.filter((c) => c.series?.length).map((c) => card(c.title, `Tracked since ${shortDate(c.firstT)}`, `<div class="grid-2">
+      <div><h3 class="sub-h">Subscribers</h3>${lineChart(c.series.map((p) => ({ t: p.t, v: p.subs })), { label: `${c.title} subscribers` })}</div>
+      <div><h3 class="sub-h">Total views</h3>${lineChart(c.series.map((p) => ({ t: p.t, v: p.views })), { label: `${c.title} views` })}</div></div>`)).join('');
+
+  return `${card('Tracked channels', '', table, '<button class="ghost" id="snap-now">Snapshot now</button>')}
+    <div class="stack">
+    ${card('Trending now', 'Videos gaining views much faster than their channel’s other recent videos since the previous snapshot. Spot breakouts while they are happening.', trending)}
+    ${card('New uploads (last 7 days)', '', uploads)}
+    ${charts}</div>`;
+}
+
+async function loadTracking() {
+  const out = $('#out-tracking');
+  out.innerHTML = loading('Loading tracked channels…');
+  try {
+    const d = await api('tracked', {});
+    out.innerHTML = renderTracking(d);
+    out.querySelectorAll('.untrack').forEach((b) => b.addEventListener('click', async () => {
+      b.disabled = true;
+      try { await apiPost('tracked/remove', { id: b.dataset.id }); loadTracking(); } catch (err) { b.disabled = false; alert(err.message); }
+    }));
+    $('#snap-now')?.addEventListener('click', async (ev) => {
+      ev.target.disabled = true; ev.target.textContent = 'Saving snapshots…';
+      try { await apiPost('tracked/refresh', {}); } catch (err) { alert(err.message); }
+      loadTracking();
+    });
+  } catch (err) { out.innerHTML = errorBox(err.message); }
+}
+
+$('#form-track').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const channel = $('#track-input').value.trim();
+  if (!channel) return;
+  const btn = e.target.querySelector('button[type=submit]');
+  btn.disabled = true;
+  apiPost('tracked', { channel })
+    .then(() => { $('#track-input').value = ''; return loadTracking(); })
+    .catch((err) => { $('#out-tracking').insertAdjacentHTML('afterbegin', errorBox(err.message)); })
+    .finally(() => { btn.disabled = false; });
+});
+
+document.addEventListener('click', async (e) => {
+  const b = e.target.closest('#track-all');
+  if (!b) return;
+  const ids = JSON.parse(b.dataset.ids || '[]');
+  b.disabled = true;
+  let done = 0;
+  for (const id of ids) {
+    b.textContent = `Tracking ${++done}/${ids.length}…`;
+    try { await apiPost('tracked', { channel: id }); } catch (err) { alert(err.message); break; }
+  }
+  b.textContent = 'Tracking ✓';
+});
+
+// ---------- My channel tab ----------
+const pctChange = (cur, prev) => (Number.isFinite(cur) && Number.isFinite(prev) && prev !== 0 ? (cur - prev) / Math.abs(prev) : null);
+const changeNote = (cur, prev) => {
+  const c = pctChange(cur, prev);
+  return c === null ? 'vs previous period: —' : `<span class="${c > 0 ? 'pos' : c < 0 ? 'neg' : ''}">${signed(c * 100, (x) => `${x.toFixed(1)}%`)}</span> vs previous period`;
+};
+
+function renderMeSetup(d) {
+  if (!d.configured) {
+    return card('Connect your own channel', 'See your private YouTube Analytics (watch time, retention, traffic sources, search terms, audience) next to your competitor research.', `
+      <ol class="steps">
+        <li>In <a href="https://console.cloud.google.com/apis/library" target="_blank" rel="noopener">Google Cloud Console</a>, enable <b>YouTube Data API v3</b> and <b>YouTube Analytics API</b>.</li>
+        <li>Go to <b>APIs &amp; Services → OAuth consent screen</b>, choose <b>External</b>, and add your Google account as a test user.</li>
+        <li>Go to <b>Credentials → Create credentials → OAuth client ID → Web application</b>. Add this authorized redirect URI:<br><code>${esc(location.origin)}/auth/google/callback</code></li>
+        <li>Put <code>GOOGLE_CLIENT_ID</code> and <code>GOOGLE_CLIENT_SECRET</code> in <code>.env</code> and restart TubeScout.</li>
+      </ol>`);
+  }
+  return card('Connect your own channel', 'Sign in with the Google account that owns your channel. TubeScout only asks for read-only access, and your sign-in is stored only on this computer.',
+    `${d.error ? errorBox(d.error) : ''}<a class="primary btn-link" href="/auth/google">Connect with Google</a>`);
+}
+
+function renderMe(d) {
+  const t = d.totals || {}, p = d.previous || {};
+  const ch = d.channel || {};
+  const netSubs = (o) => (Number.isFinite(o.subscribersGained) ? o.subscribersGained - (o.subscribersLost || 0) : null);
+  const head = `<div class="ch-head">${safeImg(ch.thumbnail) ? `<img src="${safeImg(ch.thumbnail)}" alt="">` : ''}<div>
+      <h2>${esc(ch.title || 'Your channel')}</h2><div class="meta">${esc(ch.handle || '')} · ${n(ch.subscribers)} subscribers · ${n(ch.videos)} videos · last ${d.range.days} days (${esc(d.range.startDate)} to ${esc(d.range.endDate)}, Pacific time)</div></div></div>`;
+  const kpis = `<div class="kpis">
+    ${kpi('Views', n(t.views), changeNote(t.views, p.views))}
+    ${kpi('Watch time (hours)', n(t.estimatedMinutesWatched / 60), changeNote(t.estimatedMinutesWatched, p.estimatedMinutesWatched))}
+    ${kpi('Avg view duration', Number.isFinite(t.averageViewDuration) ? dur(t.averageViewDuration) : '—', changeNote(t.averageViewDuration, p.averageViewDuration))}
+    ${kpi('Avg % viewed', Number.isFinite(t.averageViewPercentage) ? `${t.averageViewPercentage.toFixed(1)}%` : '—', changeNote(t.averageViewPercentage, p.averageViewPercentage))}
+    ${kpi('Net subscribers', signed(netSubs(t)), changeNote(netSubs(t), netSubs(p)))}
+    ${kpi('Likes', n(t.likes), changeNote(t.likes, p.likes))}
+    ${kpi('Comments', n(t.comments), changeNote(t.comments, p.comments))}
+    ${kpi('Shares', n(t.shares), changeNote(t.shares, p.shares))}
+    ${d.revenue ? kpi('Estimated revenue', `$${num(d.revenue.estimatedRevenue, 2)}`, `CPM $${num(d.revenue.cpm, 2)} · playback CPM $${num(d.revenue.playbackBasedCpm, 2)}`) : ''}
+  </div>`;
+  const daily = (d.daily || []).map((r) => ({ t: Date.parse(r.day), views: r.views, subs: r.subscribersGained - r.subscribersLost }));
+  const traffic = d.traffic ? hbars(d.traffic.slice(0, 10).map((r) => ({ label: r.label, value: r.views })), { fmt: (x) => n(x) }) : '';
+  const trafficShare = d.traffic ? `<p class="hint">${d.traffic.slice(0, 3).map((r) => `${esc(r.label)} ${pct(r.share, 0)}`).join(' · ')}</p>` : '';
+  const terms = d.searchTerms?.length ? `<div class="table-wrap"><table><thead><tr><th class="l">Search term</th><th>Views</th><th>Watch hours</th></tr></thead><tbody>
+      ${d.searchTerms.map((r) => `<tr><td class="l"><button class="linkish to-keyword" data-kw="${esc(r.insightTrafficSourceDetail)}">${esc(r.insightTrafficSourceDetail)}</button></td><td>${n(r.views)}</td><td>${n(r.estimatedMinutesWatched / 60)}</td></tr>`).join('')}</tbody></table></div>`
+    : '<p class="muted">No YouTube search traffic in this period.</p>';
+  const ages = {};
+  const genders = {};
+  for (const r of d.demographics || []) {
+    ages[r.ageGroup] = (ages[r.ageGroup] || 0) + r.viewerPercentage;
+    genders[r.gender] = (genders[r.gender] || 0) + r.viewerPercentage;
+  }
+  const ageLabel = (a) => a.replace('age', '').replace(/-$/, '+');
+  const demo = Object.keys(ages).length
+    ? `${hbars(Object.entries(ages).sort().map(([k, v]) => ({ label: ageLabel(k), value: v })), { fmt: (x) => `${x.toFixed(1)}%` })}
+       <p class="hint">${Object.entries(genders).map(([g, v]) => `${esc(g === 'user_specified' ? 'user-specified' : g)} ${v.toFixed(1)}%`).join(' · ')}</p>`
+    : '<p class="muted">YouTube hides demographics when there are too few viewers.</p>';
+  const geo = d.geography?.length ? hbars(d.geography.slice(0, 10).map((r) => ({ label: r.country === 'ZZ' ? 'Unknown' : r.country, value: r.views })), { fmt: (x) => n(x) }) : '<p class="muted">No data.</p>';
+  const top = d.topVideos?.length ? `<div class="table-wrap"><table><thead><tr><th class="l">Video</th><th>Views</th><th>Watch hours</th><th>Avg duration</th><th>Avg % viewed</th><th>Subs gained</th><th></th></tr></thead><tbody>
+      ${d.topVideos.map((v) => `<tr><td class="l wrap"><a href="${ytVideo(v.video)}" target="_blank" rel="noopener">${esc(v.title)}</a></td><td>${n(v.views)}</td><td>${n(v.estimatedMinutesWatched / 60)}</td>
+        <td>${dur(v.averageViewDuration)}</td><td>${num(v.averageViewPercentage)}%</td><td>${n(v.subscribersGained)}</td>
+        <td><button class="ghost retention" data-id="${esc(v.video)}">Retention</button></td></tr>`).join('')}</tbody></table></div><div id="retention-out"></div>`
+    : '<p class="muted">No views in this period.</p>';
+  const errs = Object.entries(d.errors || {});
+  return `${card('My channel', '', head + kpis, '<button class="ghost" id="disconnect">Disconnect</button>')}
+    <div class="stack">
+    ${errs.length ? `<div class="error">Some reports could not be loaded: ${errs.map(([k, v]) => `${esc(k)}: ${esc(v)}`).join(' · ')}</div>` : ''}
+    <div class="grid-2">
+      ${card('Daily views', '', lineChart(daily.map((r) => ({ t: r.t, v: r.views })), { label: 'Daily views', minZero: true }))}
+      ${card('Daily net subscribers', '', lineChart(daily.map((r) => ({ t: r.t, v: r.subs })), { label: 'Daily net subscribers', fmtY: (x) => signed(x) }))}
+    </div>
+    <div class="grid-2">
+      ${card('Traffic sources', 'Where your views came from.', traffic + trafficShare)}
+      ${card('YouTube search terms', 'The searches that brought viewers to your videos (top 25). Click one to research it.', terms)}
+    </div>
+    ${card('Top videos', 'Click Retention to see where viewers drop off.', top)}
+    <div class="grid-2">
+      ${card('Audience age', '% of signed-in viewers.', demo)}
+      ${card('Top countries', 'By views.', geo)}
+    </div>
+    <p class="hint">Impressions and click-through rate are not available in the YouTube Analytics API; check those in YouTube Studio.</p>
+    </div>`;
+}
+
+async function loadMe() {
+  const out = $('#out-me');
+  out.innerHTML = loading('Loading your channel analytics…');
+  try {
+    const d = await api('me', {});
+    if (!d.connected) { out.innerHTML = renderMeSetup(d); return; }
+    out.innerHTML = renderMe(d);
+    $('#disconnect').addEventListener('click', async () => {
+      if (!confirm('Disconnect your Google account from TubeScout?')) return;
+      await apiPost('/auth/logout', {}).catch((err) => alert(err.message));
+      loadMe();
+    });
+    out.querySelectorAll('.to-keyword').forEach((b) => b.addEventListener('click', () => {
+      setTab('keyword');
+      $('#keyword-input').value = b.dataset.kw;
+      $('#form-keyword').requestSubmit();
+    }));
+    out.querySelectorAll('.retention').forEach((b) => b.addEventListener('click', async () => {
+      const box = $('#retention-out');
+      box.innerHTML = loading('Loading retention…');
+      try {
+        const r = await api('me/retention', { video: b.dataset.id });
+        const pts = r.points.map((p) => ({ t: p.elapsedVideoTimeRatio, v: p.audienceWatchRatio }));
+        const rel = r.points.map((p) => p.relativeRetentionPerformance).filter(Number.isFinite);
+        const relAvg = rel.length ? rel.reduce((a, x) => a + x, 0) / rel.length : null;
+        box.innerHTML = `<h3 class="sub-h" style="margin-top:16px">Audience retention: ${esc(r.title)}</h3>
+          ${lineChart(pts, { fmtX: (x) => `${Math.round(x * 100)}%`, fmtY: (y) => `${Math.round(y * 100)}%`, label: 'Audience retention', minZero: true })}
+          <p class="hint">X axis: how far into the video. Y axis: share of viewers still watching (can exceed 100% where people rewatch).
+          ${relAvg !== null ? `Average relative retention vs similar-length YouTube videos: <b>${relAvg.toFixed(2)}</b> (0.5 = typical).` : ''}</p>`;
+      } catch (err) { box.innerHTML = errorBox(err.message); }
+    }));
+  } catch (err) { out.innerHTML = errorBox(err.message); }
+}
+
+// ---------- init ----------
+const loaders = { tracking: loadTracking, me: loadMe };
+document.querySelectorAll('.tabs button').forEach((b) => b.addEventListener('click', () => loaders[b.dataset.tab]?.()));
+
 $('#compare-input').value = store.get('compare') || '';
 $('#channel-input').value = store.get('channel') || '';
 $('#keyword-input').value = store.get('keyword') || '';
-setTab(store.get('tab') || 'compare');
+
+const hashErr = /^#me-error=(.*)$/.exec(location.hash);
+let initialTab = store.get('tab') || 'compare';
+if (location.hash.startsWith('#me')) initialTab = 'me';
+setTab(initialTab);
+loaders[initialTab]?.().then(() => {
+  if (hashErr) $('#out-me').insertAdjacentHTML('afterbegin', errorBox(`Google sign-in failed: ${decodeURIComponent(hashErr[1])}`));
+  if (location.hash) history.replaceState(null, '', location.pathname);
+});
 api('status', {}).then(updateMeta).catch(() => {});
