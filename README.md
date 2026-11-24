@@ -235,6 +235,8 @@ To run TubeScout as a website that stays on 24/7 (so tracking, rank checks and a
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Shashank21333/try)
 
+**Just testing?** [`render.free.yaml`](render.free.yaml) runs TubeScout on Render's Free plan for $0 (set *Blueprint Path* to `render.free.yaml`; see [DEPLOY.md](DEPLOY.md#free-test-version-0)). It sleeps after 15 idle minutes and loses saved data on every restart, so Tracking, Rankings and Alerts can't be tested there; the research tabs work normally.
+
 ## Hosting it
 
 By default TubeScout listens only on `127.0.0.1`, so it is private to your computer. To put it on a server, set `HOST=0.0.0.0`, `APP_PASSWORD` (enables a browser password prompt) and `PUBLIC_URL`. TubeScout **refuses to start** on a public address without `APP_PASSWORD`. Every write request must be sent as JSON, so other websites cannot trigger actions in your browser's name (CSRF). Daily snapshots, rank checks and alerts only run while the server is running.
@@ -296,6 +298,7 @@ public/features/       Tabs for AI Studio, Audit, Rankings and Alerts
 extension/             Chrome extension (Manifest V3); see extension/README.md
 test/                  node:test suite (`npm test`)
 render.yaml            Render Blueprint (web service + persistent disk); see DEPLOY.md
+render.free.yaml       Free-plan test Blueprint (no disk; data is not kept); see DEPLOY.md
 DEPLOY.md              Step-by-step guide to putting TubeScout online with Render
 ```
 

@@ -1,0 +1,36 @@
+# FREE TEST version of the TubeScout Render Blueprint (for trying TubeScout out at no cost).
+# To use it: Render Dashboard > New > Blueprint > pick this repository, and set
+# "Blueprint Path" to  render.free.yaml . Step-by-step guide: DEPLOY.md ("Free test version").
+#
+# Limits of Render's Free plan (https://render.com/docs/free), important for TubeScout:
+# - The site spins down after 15 minutes without visitors; the next visit takes about a minute.
+# - Free services have an ephemeral filesystem and cannot have a persistent disk: tracked channels,
+#   rankings, alerts and the Google sign-in are LOST whenever the service spins down, restarts or
+#   redeploys. Daily tracking, rank history and alerts therefore do not work on this plan.
+# - 750 free instance hours per workspace per month.
+# Competitors, Channel deep dive, Keyword research, Audit and AI Studio work normally.
+# For the always-on version with saved data, use render.yaml (paid) instead.
+services:
+  - type: web
+    name: tubescout-free
+    runtime: node
+    plan: free
+    # No region set: Render's default region (oregon) is used. Render's docs don't say which regions
+    # offer the Free plan, so the default is the safe choice for a test.
+    buildCommand: npm ci
+    # Started directly (not via npm) so Render's SIGTERM reaches the app.
+    startCommand: node server.js
+    # Public, password-free endpoint that only answers {"ok":true}. Everything else needs APP_PASSWORD.
+    healthCheckPath: /healthz
+    autoDeployTrigger: commit
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: HOST
+        value: 0.0.0.0
+      # Asked for during Blueprint creation (never stored in the repo):
+      - key: YOUTUBE_API_KEY
+        sync: false
+      # Password for the whole site (any username). TubeScout refuses to start without it on 0.0.0.0.
+      - key: APP_PASSWORD
+        sync: false

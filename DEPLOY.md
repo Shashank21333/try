@@ -22,7 +22,25 @@ The Hobby workspace includes 5 GB of outgoing traffic per month (then $0.15 per 
 
 The YouTube API is free within Google's daily quota. Optional extras (AI Studio, SerpApi, Keywords Everywhere) are billed by those companies, not by Render.
 
-Why not Render's free plan? Free servers go to sleep after 15 minutes without visitors, and they cannot have a disk, so tracking would stop and your data would disappear.
+Why not Render's free plan for everyday use? Free servers go to sleep after 15 minutes without visitors, and they cannot have a disk, so tracking would stop and your data would disappear. For **trying TubeScout out**, though, the free plan is fine: see the next section.
+
+## Free test version ($0)
+
+Just want to see if TubeScout is useful before paying? Use the free setup file `render.free.yaml`. Follow Steps 1 to 3 below with two differences:
+
+- In Step 2, item 3, set **Blueprint Path** to `render.free.yaml` (instead of leaving it empty). Do not use the *Deploy to Render* shortcut link: it always uses the paid `render.yaml`.
+- Render shows a web service called **tubescout-free** on the **Free** plan, with no disk. Render's docs don't say whether a free service needs a payment card; if Render asks for one, the free plan still costs $0 (a card on file also stops Render from suspending free services that use too much bandwidth).
+
+What works on the free version: **Competitors, Channel deep dive, Keyword research, Audit**, and **AI Studio** (if you add an Anthropic key), all with your real YouTube data.
+
+What does not work properly (limits of Render's Free plan, see <https://render.com/docs/free>):
+
+- The site **goes to sleep after 15 minutes** without visitors. The next visit takes **about a minute** to load. That is normal.
+- Saved things are **lost whenever it sleeps, restarts or updates**: tracked channels, rank history, alerts and the Google sign-in. So **Tracking, Rankings and Alerts** cannot be tested meaningfully here.
+- The server runs in Render's default US region (Oregon), so pages are a little slower from India.
+- Render gives 750 free server hours per month. One test site that sleeps when unused stays well within that.
+
+Liked it? Create the paid version from `render.yaml` (Steps 1 to 3 with the Blueprint Path left empty), then delete **tubescout-free** in its **Settings** page.
 
 ## Before you start
 

@@ -153,3 +153,26 @@ test('render.yaml: one Node web service with a disk at DATA_DIR, the server heal
   for (const v of svc.envVars) if (secretish.test(v.key)) assert.ok(!('value' in v) && v.sync === 'false', `${v.key} must not have a committed value`);
   assert.doesNotMatch(text, /AIza[0-9A-Za-z_-]{20,}|sk-ant-|\d{6,}:[A-Za-z0-9_-]{30,}|hooks\.slack\.com|discord(app)?\.com\/api\/webhooks/, 'no key-shaped strings');
 });
+
+test('render.free.yaml: free test variant without a disk, same health route and prompted secrets', async () => {
+  const text = await readFile(path.join(ROOT, 'render.free.yaml'), 'utf8');
+  assert.equal((text.match(/^\s*- type:/gm) || []).length, 1, 'exactly one service');
+  const svc = parseBlueprint(text);
+  assert.equal(svc.type, 'web');
+  assert.equal(svc.runtime, 'node');
+  assert.equal(svc.plan, 'free');
+  assert.deepEqual(svc.disk, {}, 'Render free web services cannot have a persistent disk');
+  assert.equal(svc.startCommand, 'node server.js');
+  assert.match(svc.buildCommand, /^npm (ci|install)\b/);
+  assert.equal(svc.healthCheckPath, '/healthz');
+  const env = Object.fromEntries(svc.envVars.map((v) => [v.key, v]));
+  assert.equal(env.HOST?.value, '0.0.0.0');
+  assert.ok(!('DATA_DIR' in env), 'no disk, so the default data/ folder (ephemeral) is used');
+  assert.ok(!('PORT' in env), 'Render sets PORT itself');
+  for (const key of ['YOUTUBE_API_KEY', 'APP_PASSWORD']) assert.equal(env[key]?.sync, 'false', `${key} is asked for at setup`);
+  const secretish = /KEY|SECRET|TOKEN|PASSWORD|WEBHOOK|CLIENT_ID|CHAT_ID/;
+  for (const v of svc.envVars) if (secretish.test(v.key)) assert.ok(!('value' in v) && v.sync === 'false', `${v.key} must not have a committed value`);
+  assert.doesNotMatch(text, /AIza[0-9A-Za-z_-]{20,}|sk-ant-/, 'no key-shaped strings');
+  // The paid and free services must have different names so both can exist in one workspace.
+  assert.notEqual(svc.name, parseBlueprint(await readFile(path.join(ROOT, 'render.yaml'), 'utf8')).name);
+});
