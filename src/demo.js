@@ -66,6 +66,7 @@ export class DemoClient {
   constructor({ now = Date.now() } = {}) {
     this.now = now;
     this.channels = new Map(); // id -> { name, seed }
+    this.videos = new Map(); // id -> generated video item (for getVideos)
     this.quotaUsed = 0;
   }
 
@@ -147,6 +148,9 @@ export class DemoClient {
           channelId: id,
           channelTitle: ch.snippet.title,
           title,
+          description: r() < 0.3
+            ? `${title}. Synthetic demo video.`
+            : `${title} — synthetic demo description. In this video we look at the ${topic.toLowerCase()} from every angle.\n\n0:00 Intro\n1:12 Design\n3:40 Performance\n6:05 Verdict\n\nGear I use: https://example.com/gear\n#${topic.replace(/\s+/g, '')} #tech`,
           thumbnails: thumb(isShort ? 'SHORT' : topic.split(' ')[0], seed + i),
           tags: [topic.toLowerCase(), 'tech', 'review', isShort ? 'shorts' : 'gadgets'],
           liveBroadcastContent: 'none',
@@ -156,11 +160,24 @@ export class DemoClient {
           likeCount: String(Math.round(views * (0.02 + r() * 0.04))),
           commentCount: String(Math.round(views * (0.001 + r() * 0.004))),
         },
-        contentDetails: { duration: iso(isShort ? 15 + Math.floor(r() * 45) : 360 + Math.floor(r() * 1200)) },
+        contentDetails: { duration: iso(isShort ? 15 + Math.floor(r() * 45) : 360 + Math.floor(r() * 1200)), caption: r() < 0.4 ? 'true' : 'false', definition: 'hd' },
       });
+      this.videos.set(vid, items.at(-1));
       t -= (7 / perWeek) * 86_400_000 * (0.5 + r());
     }
     return items;
+  }
+
+  /** Look up videos by ID. Unknown IDs get a synthetic video on a demo channel. */
+  async getVideos(ids) {
+    return [...new Set(ids)].map((id) => {
+      if (this.videos.has(id)) return this.videos.get(id);
+      const chId = this.#register('Demo Channel');
+      const pool = this.#videosFor(chId, 50);
+      const v = { ...pool[hash(id) % pool.length], id };
+      this.videos.set(id, v);
+      return v;
+    });
   }
 
   async getUploads(channel, max = 50) {
@@ -177,7 +194,11 @@ export class DemoClient {
       const id = this.#register(pick(r, names));
       const pool = this.#videosFor(id, 40, topic);
       const v = pool[Math.floor(r() * pool.length)];
-      if (v) out.push({ ...v, id: makeId(hash(q) + i, 11) });
+      if (v) {
+        const item = { ...v, id: makeId(hash(q) + i, 11) };
+        this.videos.set(item.id, item);
+        out.push(item);
+      }
     }
     return out;
   }

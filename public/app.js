@@ -680,6 +680,8 @@ window.TubeScout = {
   card, kpi, hbars, columns, lineChart, videoGrid, keywordTable, tagCloud, titlePatternTable,
   loading, errorBox, api, apiPost, download, toCsv, makeSortable, store, state, setTab, registerTab,
   goToKeyword(q) { setTab('keyword'); $('#keyword-input').value = q; $('#form-keyword').requestSubmit(); },
+  /** Deep-link params from the URL hash, e.g. /#tab=audit&video=VIDEO_ID (read by feature tabs on load). */
+  deepLink: new URLSearchParams(location.hash.startsWith('#tab=') ? location.hash.slice(1) : ''),
 };
 
 const FEATURE_MODULES = ['./features/ai.js', './features/audit.js', './features/ranks.js', './features/alerts.js'];
@@ -700,7 +702,15 @@ $('#keyword-input').value = store.get('keyword') || '';
   let initialTab = store.get('tab') || 'compare';
   if (!document.getElementById(`tab-${initialTab}`)) initialTab = 'compare';
   if (location.hash.startsWith('#me')) initialTab = 'me';
+  const link = window.TubeScout.deepLink;
+  if (link.get('tab') && document.getElementById(`tab-${link.get('tab')}`)) initialTab = link.get('tab');
   setTab(initialTab);
+  // Built-in tabs that take a query: #tab=compare|channel|keyword&q=...
+  const q = link.get('q');
+  if (q && ['compare', 'channel', 'keyword'].includes(initialTab)) {
+    $(`#${initialTab}-input`).value = q;
+    $(`#form-${initialTab}`).requestSubmit();
+  }
   await Promise.resolve(loaders[initialTab]?.()).catch(() => {});
   if (hashErr) $('#out-me').insertAdjacentHTML('afterbegin', errorBox(`Google sign-in failed: ${decodeURIComponent(hashErr[1])}`));
   if (location.hash) history.replaceState(null, '', location.pathname);
