@@ -480,14 +480,16 @@
   }
 
   async function keywordView(page) {
-    // /api/demand also calls paid add-ons (SerpAPI Trends, Keywords Everywhere) when the
-    // server has them configured, so in that case only load on an explicit click.
+    // The panel asks for lite=1: free autocomplete signals only, never the paid add-ons (SerpAPI Trends,
+    // Keywords Everywhere). Older servers ignore lite and would spend those credits, so when one of them
+    // has paid add-ons configured, only load on an explicit click.
     const cachedPath = demandPath(page.query);
     if (!cache.has(cachedPath) && !state.demandConfirmed) {
       const st = await serverStatus();
       if (!st.ok) return errorView(st, retry);
       const integ = (st.data && st.data.integrations) || {};
-      if (integ.trends || integ.volume) {
+      const honoursLite = Boolean(st.data && st.data.capabilities && st.data.capabilities.demandLite);
+      if ((integ.trends || integ.volume) && !honoursLite) {
         const paid = [integ.trends ? 'SerpAPI (Google Trends)' : null, integ.volume ? 'Keywords Everywhere' : null].filter(Boolean).join(' and ');
         return h('div', {},
           h('p', {}, 'Search demand for ', h('b', { text: `“${page.query}”` })),
@@ -540,7 +542,7 @@
   }
 
   function demandPath(q) {
-    return L.apiPath('/api/demand', { q, hl: L.normalizeHl(document.documentElement.lang) });
+    return L.apiPath('/api/demand', { q, hl: L.normalizeHl(document.documentElement.lang), lite: 1 });
   }
 
   // ---------- navigation (YouTube is a single-page app) ----------

@@ -16,7 +16,8 @@
     volume: 'Search volume (Keywords Everywhere)',
     oauth: 'My channel (Google sign-in)',
     ai: 'AI Studio',
-    alerts: 'Alerts',
+    // `alerts` is true only when Telegram or a webhook is configured; the in-app alert feed always works.
+    alerts: 'Alert delivery (Telegram / Discord / Slack / webhook)',
   };
 
   const send = (msg) => chrome.runtime.sendMessage(msg).catch(L.messagingFailure);
@@ -62,6 +63,10 @@
     if (detailed) {
       if (typeof st.quotaUsedSinceStart === 'number') {
         out.append(el('div', 'muted', `YouTube API units used since the server started: ${st.quotaUsedSinceStart}`));
+      }
+      if (typeof st.searchCallsSinceStart === 'number') {
+        // search.list has its own daily bucket (about 100 calls by default), separate from the 10,000 units.
+        out.append(el('div', 'muted', `YouTube search calls since the server started: ${st.searchCallsSinceStart}`));
       }
       const integ = st.integrations && typeof st.integrations === 'object' ? st.integrations : {};
       const ul = el('ul');

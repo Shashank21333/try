@@ -148,6 +148,31 @@ test('searchDemand isolates failures of optional sources', async () => {
   await assert.rejects(searchDemand('  '), /keyword/);
 });
 
+test('searchDemand lite: free autocomplete signals only, never the paid Trends / volume APIs', async () => {
+  const hosts = [];
+  const fetchImpl = async (u) => {
+    const host = new URL(u).hostname;
+    hosts.push(host);
+    if (host === 'suggestqueries.google.com') return fakeSuggest()(u);
+    throw new Error(`paid API called in lite mode: ${host}`);
+  };
+  const d = await searchDemand('budget phone', { serpApiKey: 'S', keKey: 'K', lite: true, fetchImpl });
+  assert.equal(d.lite, true);
+  assert.equal(d.autocomplete.found, true);
+  assert.ok(Array.isArray(d.ideas) && d.ideas.length > 0);
+  assert.deepEqual(d.trends, { enabled: true, skipped: true, url: trendsUrl('budget phone') });
+  assert.deepEqual(d.volume, { enabled: true, skipped: true });
+  assert.ok(hosts.length > 0 && hosts.every((h) => h === 'suggestqueries.google.com'), hosts.join());
+
+  // Without lite the same keys are used (sanity check that the test would catch a regression).
+  const paid = [];
+  await searchDemand('budget phone', {
+    serpApiKey: 'S', keKey: 'K',
+    fetchImpl: async (u) => { const h = new URL(u).hostname; if (h !== 'suggestqueries.google.com') paid.push(h); return h === 'suggestqueries.google.com' ? fakeSuggest()(u) : json({ error: 'no' }, 401); },
+  });
+  assert.ok(paid.includes('serpapi.com') && paid.includes('api.keywordseverywhere.com'), paid.join());
+});
+
 test('JsonStore writes atomically, serializes updates, and restricts file modes', async () => {
   const dir = await tmp();
   try {

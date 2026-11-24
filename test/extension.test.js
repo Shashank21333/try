@@ -475,3 +475,10 @@ test('"Full audit" deep link keeps the target keyword the panel scored with', ()
   // ...and the panel passes its keyword.
   assert.match(read('content.js'), /tab: 'audit', video: page\.videoId, keyword: state\.keyword/);
 });
+
+test('content.js: the keyword panel asks for lite demand data (no paid add-on credits)', () => {
+  const src = read('content.js');
+  assert.match(src, /L\.apiPath\('\/api\/demand', \{[^}]*\blite: 1\b/);
+  // Servers without lite support would still spend credits: those keep the click-to-load gate.
+  assert.match(src, /capabilities\.demandLite/);
+});

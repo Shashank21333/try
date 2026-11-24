@@ -312,7 +312,21 @@ function setTab(name) {
   document.querySelectorAll('.tabs button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === name)));
   document.querySelectorAll('.tab-panel').forEach((p) => { p.hidden = p.id !== `tab-${name}`; });
   store.set('tab', name);
+  revealActiveTab();
 }
+
+// On narrow screens the tab bar scrolls sideways: keep the active tab in view (after a reload, a deep link
+// to a tab near the end, or a tab label growing, e.g. "Alerts (4)"). Only the bar scrolls, never the page.
+function revealActiveTab() {
+  const nav = document.querySelector('.tabs');
+  const btn = nav?.querySelector('[aria-selected="true"]');
+  if (!btn || nav.scrollWidth <= nav.clientWidth) return;
+  const nr = nav.getBoundingClientRect();
+  const br = btn.getBoundingClientRect();
+  if (br.left < nr.left) nav.scrollLeft -= nr.left - br.left + 16;
+  else if (br.right > nr.right) nav.scrollLeft += br.right - nr.right + 16;
+}
+new MutationObserver(revealActiveTab).observe(document.querySelector('.tabs'), { childList: true, subtree: true, characterData: true });
 document.querySelectorAll('.tabs button').forEach((b) => b.addEventListener('click', () => setTab(b.dataset.tab)));
 
 async function run(form, out, msg, fn) {

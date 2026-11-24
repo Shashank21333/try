@@ -208,7 +208,12 @@ export async function fetchVolumes(keywords, { apiKey, country = 'us', currency 
 
 // ---------- combined ----------
 
-export async function searchDemand(q, { region, hl = 'en', serpApiKey, keKey, keMaxKeywords = 20, keCountry, fetchImpl } = {}) {
+/**
+ * Autocomplete strength + keyword ideas (free), plus Google Trends (SerpApi) and search volume
+ * (Keywords Everywhere) when their keys are set. `lite` skips the two paid lookups even when keys are
+ * set, so automatic callers (the Chrome extension on every search page) never spend those credits.
+ */
+export async function searchDemand(q, { region, hl = 'en', serpApiKey, keKey, keMaxKeywords = 20, keCountry, lite = false, fetchImpl } = {}) {
   const keyword = normalizeKeyword(q);
   if (!keyword) throw Object.assign(new Error('Please enter a keyword.'), { status: 400 });
   const gl = region || undefined;
@@ -217,16 +222,21 @@ export async function searchDemand(q, { region, hl = 'en', serpApiKey, keKey, ke
   const [strength, ideas, trends] = await Promise.all([
     settled(autocompleteStrength(keyword, { hl, gl, fetchImpl })),
     settled(keywordIdeas(keyword, { hl, gl, fetchImpl })),
-    settled(fetchTrends(keyword, { apiKey: serpApiKey, geo: region, hl, fetchImpl })),
+    lite
+      ? { value: { enabled: Boolean(serpApiKey), skipped: true, url: trendsUrl(keyword, region) } }
+      : settled(fetchTrends(keyword, { apiKey: serpApiKey, geo: region, hl, fetchImpl })),
   ]);
   const ideaList = ideas.value || [];
-  const volume = await settled(fetchVolumes([keyword, ...ideaList.slice(0, keMaxKeywords).map((i) => i.keyword)], {
-    apiKey: keKey, country: (keCountry || region || 'us').toLowerCase(), fetchImpl,
-  }));
+  const volume = lite
+    ? { value: { enabled: Boolean(keKey), skipped: true } }
+    : await settled(fetchVolumes([keyword, ...ideaList.slice(0, keMaxKeywords).map((i) => i.keyword)], {
+      apiKey: keKey, country: (keCountry || region || 'us').toLowerCase(), fetchImpl,
+    }));
 
   return {
     keyword,
     region: region || null,
+    lite,
     autocomplete: strength.value ? { ...strength.value } : { error: strength.error },
     ideas: ideas.value ? ideaList.slice(0, 80) : { error: ideas.error },
     trends: trends.value || { enabled: Boolean(serpApiKey), url: trendsUrl(keyword, region), error: trends.error },

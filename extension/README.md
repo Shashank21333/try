@@ -5,8 +5,8 @@ A Manifest V3 extension that shows data from **your own** TubeScout server direc
 | YouTube page | Panel shows | Server endpoint |
 |---|---|---|
 | `/watch?v=…`, `/shorts/…`, `/live/…` | Views per day, outlier score vs the channel's median, engagement rate, SEO score and grade with the 3 checks to fix first (optionally re-scored for a target keyword), the video's tags with a copy button. Buttons: **Track channel**, **Full audit** (opens the Audit tab), **Open dashboard** | `GET /api/video` |
-| `/@handle`, `/channel/UC…`, `/user/…` | Subscribers, median views, uploads per week, engagement, top 3 outlier videos. Buttons: **Track channel**, **Open in TubeScout** | `GET /api/channel` |
-| `/results?search_query=…` | Autocomplete strength with the prefix that triggers it, top 8 keyword ideas. Button: **Research in TubeScout** | `GET /api/demand` |
+| `/@handle`, `/channel/UC…`, `/user/…` | Subscribers, median views, uploads per week, engagement, top 3 outlier videos (from the last 50 uploads). Buttons: **Track channel**, **Open in TubeScout**, **Open dashboard** | `GET /api/channel` |
+| `/results?search_query=…` | Autocomplete strength with the prefix that triggers it, top 8 keyword ideas. Buttons: **Research in TubeScout**, **Open dashboard** | `GET /api/demand?lite=1` |
 
 On watch pages the panel sits at the top of the recommendations column, or under the video's title and description when the window is too narrow for that column; elsewhere it floats at the top right. A floating panel that would cover a video (for example on Shorts in a narrow window) starts collapsed on that page. Click the header to collapse or expand it (remembered for all pages). It follows YouTube's light or dark theme.
 
@@ -25,7 +25,7 @@ Open the settings from the toolbar popup (**Settings**) or the slider icon in th
 
 - **Server URL**: where TubeScout runs. `http://localhost:<any port>` and `http://127.0.0.1:<any port>` work out of the box. Any other address (another computer, `https://…`) makes Chrome ask for permission to reach that host when you click **Save**. Access to the previous non-local host is removed when you change it.
 - **Password**: only if you set `APP_PASSWORD` on the server. It is sent as HTTP Basic auth (any username).
-- **Test connection** checks the URL and password typed in the form, even before you save them (a new non-local host needs **Save** first so Chrome can grant access), and shows live/demo mode, API units used since the server started, enabled integrations, and warns if the server is too old for the video panel.
+- **Test connection** checks the URL and password typed in the form, even before you save them (a new non-local host needs **Save** first so Chrome can grant access), and shows live/demo mode, YouTube API units and search calls used since the server started, enabled integrations (alert delivery shows as on only when Telegram or a webhook is set up), and warns if the server is too old for the video panel.
 
 ## Permissions
 
@@ -40,17 +40,17 @@ How requests flow: the YouTube page's content script asks the background service
 
 ## Privacy
 
-The extension talks only to the server URL you configure. For the YouTube page you are viewing, it sends the video ID, channel handle/ID or search term to that server. There are no analytics, no remote code and no third-party requests. Your server then calls YouTube (the Data API, or the public autocomplete for keywords) exactly as the dashboard does.
+The extension talks only to the server URL you configure. For the YouTube page you are viewing, it sends the video ID (plus any target keyword you type), channel handle/ID or search term to that server. There are no analytics, no remote code and no third-party requests. Your server then calls YouTube (the Data API, or the public autocomplete for keywords) exactly as the dashboard does.
 
 ## Costs and limits
 
-- **Video and channel panels** use your server's YouTube Data API quota in live mode: a few units per video or channel (the free quota is 10,000 units/day; see the main README's quota table). Results are cached for 5 minutes per tab, and collapsed panels load nothing.
-- **Keyword panel** uses YouTube's public autocomplete (no API units). If your server has `SERPAPI_KEY` or `KE_API_KEY` set, `/api/demand` also spends those credits, so the panel waits for a click instead of loading automatically.
+- **Video and channel panels** use your server's YouTube Data API quota in live mode: about 4 units per video and 3–4 per channel, out of the 10,000 units/day pool (see the main README's [API quota](../README.md#api-quota) table). They use none of the ~100 daily search calls, except a `/user/…` page whose legacy username YouTube cannot resolve directly. Results are cached for 5 minutes per tab, and collapsed panels load nothing.
+- **Keyword panel** uses YouTube's public autocomplete (no API units, no search calls). It requests `/api/demand` with `lite=1`, which skips Google Trends (SerpApi) and Keywords Everywhere even when your server has `SERPAPI_KEY` or `KE_API_KEY`, so it loads automatically and never spends those credits. With an older server that does not support `lite` (its `/api/status` has no `capabilities.demandLite`) and has one of those keys set, the panel waits for a click instead. Use **Research in TubeScout** for the full Trends and volume data.
 - **Demo mode** (no `YOUTUBE_API_KEY` on the server): video and channel numbers are synthetic and the panel says so. Keyword data is real.
 - The SEO score and outlier score are TubeScout's heuristics, not YouTube ranking rules; checks that are actual YouTube limits are labeled "YouTube rule".
 - YouTube's page structure and its `yt-navigate-finish` event are not a public API. The extension also watches the URL as a fallback and floats the panel if it cannot find the sidebar or the area under the video, but a YouTube redesign can still affect placement.
 - Requests to your server time out after 25 seconds, because Chrome stops an extension's background worker when a request gets no response for 30 seconds.
-- Only `www.youtube.com` is supported (not `m.youtube.com`, YouTube Music or YouTube Studio).
+- Only `www.youtube.com` is supported (not `m.youtube.com`, YouTube Music or YouTube Studio). Channel pages under `/c/…` custom URLs get no panel, because the server could only resolve them with a YouTube search call.
 
 ## Files
 

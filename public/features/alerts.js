@@ -69,7 +69,10 @@ const tabButton = () => document.querySelector('.tabs button[data-tab="alerts"]'
 function setUnread(unread) {
   const btn = tabButton();
   if (!btn) return;
-  btn.textContent = unread > 0 ? `Alerts (${unread > 99 ? '99+' : unread})` : 'Alerts';
+  const label = unread > 0 ? `Alerts (${unread > 99 ? '99+' : unread})` : 'Alerts';
+  // Only touch the DOM on a change: app.js re-scrolls the mobile tab bar to the active tab on label
+  // mutations, which would undo the user's own sideways scrolling every 60 s.
+  if (btn.textContent !== label) btn.textContent = label;
   btn.setAttribute('aria-label', unread > 0 ? `Alerts, ${unread} unread` : 'Alerts');
 }
 

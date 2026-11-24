@@ -14,6 +14,8 @@ import { GoogleOAuth } from './src/oauth.js';
 import { ChannelAnalytics } from './src/ytanalytics.js';
 import { EventEmitter } from 'node:events';
 import { FEATURES } from './src/features/index.js';
+import { deliveryConfig } from './src/alerts.js';
+import { aiEnabled, loadSdk } from './src/ai.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(ROOT, 'public');
@@ -91,6 +93,7 @@ async function readJson(req) {
   return body;
 }
 
+const alertDelivery = deliveryConfig(env); // booleans/kind/host only, never secrets
 const meta = () => ({
   mode: DEMO ? 'demo' : 'live',
   quotaUsedSinceStart: client.quotaUsed,
@@ -99,13 +102,14 @@ const meta = () => ({
     trends: Boolean(env.SERPAPI_KEY),
     volume: Boolean(env.KE_API_KEY),
     oauth: oauth.configured,
-    ai: Boolean(env.ANTHROPIC_API_KEY || env.AI_ENABLED === '1'),
-    alerts: Boolean(env.TELEGRAM_BOT_TOKEN || env.ALERT_WEBHOOK_URL),
+    ai: aiEnabled(env),
+    alerts: alertDelivery.telegram.configured || alertDelivery.webhook.configured, // external delivery (the in-app feed always works)
   },
 });
 
 const routes = {
-  'GET /api/status': async () => meta(),
+  // `capabilities` lets clients such as the Chrome extension detect optional server features.
+  'GET /api/status': async () => ({ ...meta(), capabilities: { demandLite: true } }),
 
   'GET /api/channel': async (url) => ({
     ...(await analyzeChannel(client, url.searchParams.get('q'), { tz: intParam(url.searchParams.get('tz'), 0, -840, 840), max: intParam(url.searchParams.get('max'), 50, 10, 200) })),
@@ -131,6 +135,7 @@ const routes = {
       keKey: env.KE_API_KEY,
       keCountry: env.KE_COUNTRY,
       keMaxKeywords: intParam(env.KE_MAX_KEYWORDS, 20, 0, 99),
+      lite: url.searchParams.get('lite') === '1', // free signals only: no SerpApi / Keywords Everywhere credits
     })),
     meta: meta(),
   }),
@@ -232,7 +237,13 @@ server.listen(PORT, HOST, () => {
   console.log(DEMO
     ? 'DEMO MODE: channel data is synthetic. Set YOUTUBE_API_KEY in .env for real channels.'
     : 'Live mode: using the YouTube Data API v3.');
-  console.log(`Integrations: Google Trends ${env.SERPAPI_KEY ? 'ON' : 'off'} · Keyword volume ${env.KE_API_KEY ? 'ON' : 'off'} · My channel login ${oauth.configured ? 'ON' : 'off'}`);
+  const on = (x) => (x ? 'ON' : 'off');
+  const { integrations: i } = meta();
+  const { telegram, webhook } = alertDelivery;
+  const targets = [telegram.configured && 'Telegram', webhook.configured && ({ discord: 'Discord', slack: 'Slack' }[webhook.kind] || 'webhook')].filter(Boolean);
+  console.log(`Integrations: Google Trends ${on(i.trends)} · Keyword volume ${on(i.volume)} · My channel login ${on(i.oauth)} · AI Studio ${on(i.ai)} · Alert delivery ${targets.length ? `ON (${targets.join(', ')})` : 'off (in-app feed only)'}`);
+  for (const [name, d] of [['Telegram', telegram], ['Webhook', webhook]]) if (d.error) console.warn(`Alerts: ${name} delivery is off: ${d.error}`);
+  if (i.ai) loadSdk().then((sdk) => { if (!sdk) console.warn('AI Studio: the Anthropic SDK is not installed, so AI requests will fail. Run npm install and restart.'); });
 });
 
 // Daily snapshots of tracked channels: check hourly, snapshot anything older than ~20h.

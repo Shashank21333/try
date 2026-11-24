@@ -223,7 +223,9 @@ const inTop = (p, n) => p !== null && p <= n;
 
 /**
  * Alert candidate from a 'ranks' event, or null.
- * { itemId, keyword, region, channelId, channelTitle, previous: { position|null, t|null }, current: { position|null, videoId, title, t } }
+ * { itemId, keyword, region, channelId, channelTitle, previous: { position|null, t|null }, current: { position|null, videoId, title, t, resultCount } }
+ * src/ranks.js emits it only for conclusive checks (a "not found" on a short result page is not one), and
+ * `previous` is the last conclusive check, so position null here really means "not in the top 50".
  */
 export function rankAlert(e, settings = defaultSettings()) {
   if (!e?.current || !e.keyword) return null;
