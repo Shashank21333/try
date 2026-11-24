@@ -12,6 +12,15 @@ export const SCOPES = {
   revenue: 'https://www.googleapis.com/auth/yt-analytics-monetary.readonly',
 };
 
+/**
+ * The app's public address, used for the Google sign-in redirect URI <publicUrl>/auth/google/callback.
+ * PUBLIC_URL wins; on Render, RENDER_EXTERNAL_URL (the service's https://<name>.onrender.com URL, set by
+ * Render) is the fallback; otherwise http://localhost:PORT. Trailing slashes are dropped.
+ */
+export function publicUrl(env, port) {
+  return (env.PUBLIC_URL || env.RENDER_EXTERNAL_URL || `http://localhost:${port}`).replace(/\/+$/, '');
+}
+
 export class GoogleOAuth {
   constructor({ clientId, clientSecret, redirectUri, includeRevenue = false, store, fetchImpl = globalThis.fetch, now = () => Date.now() }) {
     this.clientId = clientId;

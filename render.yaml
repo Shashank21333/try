@@ -1,0 +1,47 @@
+# Render Blueprint for TubeScout: one always-on web service plus a small persistent disk.
+# Step-by-step guide: DEPLOY.md. Field reference: https://render.com/docs/blueprint-spec
+#
+# No secrets live in this file. Keys marked `sync: false` are typed into the Render Dashboard when
+# the Blueprint is created. Optional keys (AI, Trends, Telegram, Google sign-in...) are added later
+# in the service's Environment tab; Render keeps variables that are not listed here.
+services:
+  - type: web
+    name: tubescout
+    runtime: node
+    # 0.5 CPU / 512 MB RAM, always on (the plan Render used to call "starter"). A persistent disk needs
+    # a paid plan; the free plan sleeps after 15 idle minutes and loses its files. Price: render.com/pricing
+    plan: 0.5c-512mb
+    # Render's regions are oregon, ohio, virginia, frankfurt and singapore. Singapore is the closest to
+    # India, so pages load fastest there. The region cannot be changed after the service is created.
+    region: singapore
+    # package-lock.json is committed, so install exactly those versions.
+    buildCommand: npm ci
+    # Same as `npm start`, but without npm in between: Render stops the app with SIGTERM, and npm's
+    # shell does not pass that signal on, so TubeScout could not save its data before shutting down.
+    startCommand: node server.js
+    # Public, password-free endpoint that only answers {"ok":true}. Everything else needs APP_PASSWORD.
+    healthCheckPath: /healthz
+    # Redeploy automatically on every push to the linked branch.
+    autoDeployTrigger: commit
+    # Only files under mountPath survive deploys and restarts, so DATA_DIR below must point here.
+    # Render can grow a disk later but never shrink it, so start small.
+    disk:
+      name: tubescout-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      # Node.js 22 (latest 22.x release). package.json only says ">=20", which Render would resolve
+      # to the newest Node major.
+      - key: NODE_VERSION
+        value: "22"
+      # Render forwards traffic to the PORT it sets (10000) on host 0.0.0.0.
+      - key: HOST
+        value: 0.0.0.0
+      - key: DATA_DIR
+        value: /var/data
+      # Asked for during Blueprint creation (never stored in the repo):
+      - key: YOUTUBE_API_KEY
+        sync: false
+      # Password for the whole site (any username). TubeScout refuses to start without it on 0.0.0.0.
+      - key: APP_PASSWORD
+        sync: false

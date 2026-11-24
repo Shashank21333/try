@@ -85,7 +85,7 @@ TubeScout reads `.env` at startup (variables already set in the environment win)
 | `PORT` | `3000` | HTTP port |
 | `HOST` | `127.0.0.1` | Listen address. Anything other than `127.0.0.1`, `localhost` or `::1` requires `APP_PASSWORD` |
 | `APP_PASSWORD` | unset | Password for the whole app (HTTP Basic auth, any username) |
-| `PUBLIC_URL` | `http://localhost:PORT` | Public address, used for the Google sign-in redirect |
+| `PUBLIC_URL` | `RENDER_EXTERNAL_URL` if set (Render sets it), else `http://localhost:PORT` | Public address, used for the Google sign-in redirect |
 | `DATA_DIR` | `data` | Where tracked channels, snapshots, rankings, alerts and your Google sign-in are stored |
 | `DISABLE_SCHEDULER` | unset | `1` stops the background jobs: daily tracking snapshots and automatic rank checks (manual refreshes still work, and alerts then come only from those) |
 
@@ -229,9 +229,20 @@ Quotas reset at midnight Pacific Time. Your project's actual limits are in the G
 - Titles and Video ideas also use YouTube API units for the competitor channels (see the table above). Autocomplete is free.
 - AI output can be wrong. Scores and the 70/150-character guides are TubeScout heuristics, not YouTube rules. Review everything before publishing.
 
+## Deploy online (Render)
+
+To run TubeScout as a website that stays on 24/7 (so tracking, rank checks and alerts keep running), follow **[DEPLOY.md](DEPLOY.md)**. It is a click-by-click guide for [Render](https://render.com) using the included Blueprint, [`render.yaml`](render.yaml): an always-on web service in Singapore with a 1 GB persistent disk, about US$7.25 per month (confirm on [render.com/pricing](https://render.com/pricing)). Render asks for `YOUTUBE_API_KEY` and `APP_PASSWORD` during setup; no secrets are stored in the repository.
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Shashank21333/try)
+
 ## Hosting it
 
 By default TubeScout listens only on `127.0.0.1`, so it is private to your computer. To put it on a server, set `HOST=0.0.0.0`, `APP_PASSWORD` (enables a browser password prompt) and `PUBLIC_URL`. TubeScout **refuses to start** on a public address without `APP_PASSWORD`. Every write request must be sent as JSON, so other websites cannot trigger actions in your browser's name (CSRF). Daily snapshots, rank checks and alerts only run while the server is running.
+
+- **Health check:** `GET /healthz` answers `200 {"ok":true}` without the password (and reveals nothing else), for load balancers and hosts such as Render. Every other path still requires `APP_PASSWORD`.
+- **Public address:** if `PUBLIC_URL` is empty, TubeScout uses `RENDER_EXTERNAL_URL` (set automatically by Render to `https://<service>.onrender.com`), so the Google sign-in redirect works on Render without extra setup. Set `PUBLIC_URL` when you use your own domain.
+- **Data:** point `DATA_DIR` at a persistent disk; a container's own filesystem is usually wiped on every deploy.
+- **Shutdown:** on `SIGTERM` (sent by hosts before a restart) or Ctrl+C, TubeScout stops accepting requests, lets queued data writes finish, and exits.
 
 ## HTTP API
 
@@ -284,6 +295,8 @@ public/                Frontend (vanilla JS, light and dark mode, mobile friendl
 public/features/       Tabs for AI Studio, Audit, Rankings and Alerts
 extension/             Chrome extension (Manifest V3); see extension/README.md
 test/                  node:test suite (`npm test`)
+render.yaml            Render Blueprint (web service + persistent disk); see DEPLOY.md
+DEPLOY.md              Step-by-step guide to putting TubeScout online with Render
 ```
 
 Files in `DATA_DIR`: `tracked.json`, `snap-<channel>.json` (last 400 snapshots each), `oauth.json` (owner-only), `ranks.json`, `rank-<id>.json`, `ranks-quota.json`, `alerts.json`, `alerts-settings.json`, `alerts-seen.json`.

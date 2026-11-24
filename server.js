@@ -10,7 +10,7 @@ import { analyzeChannel, compareChannels, researchKeyword } from './src/service.
 import { searchDemand } from './src/demand.js';
 import { JsonStore } from './src/store.js';
 import { Tracker } from './src/tracker.js';
-import { GoogleOAuth } from './src/oauth.js';
+import { GoogleOAuth, publicUrl } from './src/oauth.js';
 import { ChannelAnalytics } from './src/ytanalytics.js';
 import { EventEmitter } from 'node:events';
 import { FEATURES } from './src/features/index.js';
@@ -32,7 +32,7 @@ try {
 const env = process.env;
 const PORT = Number(env.PORT) || 3000;
 const HOST = env.HOST || '127.0.0.1';
-const PUBLIC_URL = (env.PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/+$/, '');
+const PUBLIC_URL = publicUrl(env, PORT); // PUBLIC_URL, else Render's RENDER_EXTERNAL_URL, else http://localhost:PORT
 const DEMO = !env.YOUTUBE_API_KEY || env.DEMO === '1';
 const APP_PASSWORD = env.APP_PASSWORD || '';
 const isLoopback = ['127.0.0.1', 'localhost', '::1'].includes(HOST);
@@ -51,7 +51,7 @@ const oauth = new GoogleOAuth({
 const channelAnalytics = new ChannelAnalytics({ oauth });
 
 if (!isLoopback && !APP_PASSWORD) {
-  console.error(`Refusing to listen on ${HOST} without APP_PASSWORD: anyone on the network could use your API quota${oauth.configured ? ' and read your private channel analytics' : ''}. Set APP_PASSWORD in .env.`);
+  console.error(`Refusing to listen on ${HOST} without APP_PASSWORD: anyone on the network could use your API quota${oauth.configured ? ' and read your private channel analytics' : ''}. Set APP_PASSWORD in .env (on a host such as Render: in the service's environment settings).`);
   process.exit(1);
 }
 
@@ -202,6 +202,8 @@ const redirect = (res, location) => { res.writeHead(302, { Location: location, .
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
+  // Health check for hosts such as Render: public on purpose, so it answers only "the server is up".
+  if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname === '/healthz') return send(res, 200, { ok: true });
   if (!authorized(req)) return send(res, 401, 'Authentication required', 'text/plain', { 'WWW-Authenticate': 'Basic realm="TubeScout"' });
 
   if (req.method === 'GET' && url.pathname === '/auth/google') {
@@ -235,7 +237,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(`TubeScout running at ${PUBLIC_URL}  (listening on ${HOST}:${PORT})`);
   console.log(DEMO
-    ? 'DEMO MODE: channel data is synthetic. Set YOUTUBE_API_KEY in .env for real channels.'
+    ? 'DEMO MODE: channel data is synthetic. Set YOUTUBE_API_KEY (in .env or your host\'s environment settings) for real channels.'
     : 'Live mode: using the YouTube Data API v3.');
   const on = (x) => (x ? 'ON' : 'off');
   const { integrations: i } = meta();
@@ -253,3 +255,17 @@ if (env.DISABLE_SCHEDULER !== '1') {
   setInterval(runSnapshots, 3600_000).unref();
   for (const f of features) f.start?.();
 }
+
+// Graceful shutdown: hosts such as Render send SIGTERM before a redeploy or restart (and SIGKILL about
+// 30 seconds later). Stop taking new requests, give running ones a moment, let queued data writes finish, exit.
+let stopping = false;
+async function shutdown(signal) {
+  if (stopping) return;
+  stopping = true;
+  console.log(`${signal} received: saving data and shutting down.`);
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms).unref());
+  await Promise.race([new Promise((r) => server.close(r)), wait(15_000)]);
+  await Promise.race([store.flush(), wait(5_000)]);
+  process.exit(0);
+}
+for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => { shutdown(signal); });

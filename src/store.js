@@ -54,6 +54,15 @@ export class JsonStore {
     return result;
   }
 
+  /** Resolves once every queued write has settled, including writes queued while waiting (used on shutdown). */
+  async flush() {
+    for (let i = 0; i < 20; i++) {
+      const pending = [...this.queues.values()];
+      await Promise.allSettled(pending);
+      if ([...this.queues.values()].every((p) => pending.includes(p))) return;
+    }
+  }
+
   async remove(name) {
     try { await unlink(this.#file(name)); } catch (e) { if (e.code !== 'ENOENT') throw e; }
   }
