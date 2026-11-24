@@ -6,7 +6,7 @@ import {
   DEFAULT_MODEL, FALLBACK_BETA, MAX_TOKENS, TAGS_MAX_CHARS, SETUP_MESSAGE, SDK_MISSING_MESSAGE, SCHEMAS,
   createAI, parseResponse, mapApiError, loadSdk, aiEnabled,
   parseTitlesInput, parseDescriptionInput, parseIdeasInput, parseScriptInput,
-  scoreTitle, keywordMatch, isAllCaps, hasSubstance, tagCost, tagsLength, fitTags, cleanHashtags,
+  scoreTitle, keywordMatch, isAllCaps, hasSubstance, hypePhrases, tagCost, tagsLength, fitTags, cleanHashtags,
   scrubDescription, truncateBytes, chapterChecks, clean, dataBlock,
 } from '../src/ai.js';
 import { create } from '../src/features/ai.js';
@@ -160,7 +160,10 @@ test('mapApiError uses typed SDK classes, most specific first', () => {
   const generic = mapApiError(new APIError(529, 'Overloaded'), FakeSdk);
   assert.equal(generic.status, 502);
   assert.match(generic.message, /529/);
-  assert.equal(mapApiError(new Error('boom'), FakeSdk).status, 502);
+  // Thrown by the SDK before any request (e.g. no credentials could be resolved): a setup hint.
+  const local = mapApiError(new Error('Could not resolve authentication method.'), FakeSdk);
+  assert.equal(local.status, 500);
+  assert.match(local.message, /ANTHROPIC_API_KEY/);
   assert.equal(mapApiError(new Error('boom'), null).status, 502);
 });
 
@@ -265,6 +268,11 @@ test('scoreTitle: transparent checks and weights', () => {
   const caps = scoreTitle('BUDGET PHONE REVIEW HONEST', { keyword: 'budget phone' });
   assert.equal(caps.checks.find((c) => c.key === 'caps').passed, false);
 
+  const hyped = scoreTitle("Budget Phone Review: You Won't Believe This", { keyword: 'budget phone' });
+  const sub = hyped.checks.find((c) => c.key === 'substance');
+  assert.equal(sub.passed, true, 'hype plus a real subject is not clickbait-only');
+  assert.match(sub.label, /leans on hype \("you won't believe"\)/);
+
   const bait = scoreTitle("You Won't Believe What Happened!!!", { keyword: 'budget phone' });
   assert.equal(bait.checks.find((c) => c.key === 'substance').passed, false);
   assert.equal(bait.checks.find((c) => c.key === 'keyword').passed, false);
@@ -284,11 +292,16 @@ test('keyword, caps and substance helpers', () => {
   assert.equal(keywordMatch('Best Budget-Phone of 2026', 'budget phone'), 'phrase');
   assert.equal(keywordMatch('Which Phone on a Budget?', 'budget phone'), 'words');
   assert.equal(keywordMatch('Gaming laptop review', 'budget phone'), null);
+  assert.equal(keywordMatch('I Tested 5 Budget Phones', 'budget phone'), 'words', 'simple plurals count');
+  assert.equal(keywordMatch('Budget phone review', 'budget phones'), 'words');
+  assert.equal(keywordMatch('Glass screen protector', 'glass'), 'phrase');
   assert.equal(isAllCaps('THIS IS ALL CAPS'), true);
   assert.equal(isAllCaps('This Has ONE Caps Word'), false);
   assert.equal(isAllCaps('बजट फोन रिव्यू'), false, 'scripts without case are never ALL CAPS');
   assert.equal(hasSubstance('This Changed Everything 🤯'), false);
   assert.equal(hasSubstance('I Tested 7 Budget Phones'), true);
+  assert.deepEqual(hypePhrases('INSANE budget phone, gone wrong (insane)'), ['"insane"', '"gone wrong"']);
+  assert.deepEqual(hypePhrases('Budget phone review'), []);
 });
 
 // ---------- tags, hashtags, description scrubbing ----------

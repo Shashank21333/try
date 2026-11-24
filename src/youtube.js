@@ -1,7 +1,8 @@
 // Thin client for the YouTube Data API v3 with in-memory caching and quota tracking.
-// Quota costs (default daily quota is 10,000 units):
-//   channels.list, videos.list, playlistItems.list = 1 unit per call
-//   search.list = 100 units per call
+// Quota (YouTube Data API docs, granular quota since June 1, 2026):
+//   channels.list, videos.list, playlistItems.list = 1 unit per call from the 10,000 units/day pool
+//   search.list = its own "Search Queries" bucket: 1 per call, default 100 calls/day
+//   https://developers.google.com/youtube/v3/determine_quota_cost
 
 const API_BASE = 'https://www.googleapis.com/youtube/v3';
 
@@ -43,9 +44,11 @@ export class YouTubeClient {
     this.fetch = fetchImpl;
     this.cacheTtlMs = cacheTtlMs;
     this.cache = new Map();
-    this.quotaUsed = 0;
+    this.quotaUsed = 0; // units from the 10,000/day pool
+    this.searchCalls = 0; // calls from the separate search.list bucket (default 100/day)
   }
 
+  /** cost = units from the main pool; search.list calls are counted in their own bucket instead. */
   async request(endpoint, params, cost = 1) {
     const url = new URL(`${API_BASE}/${endpoint}`);
     for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
@@ -60,11 +63,12 @@ export class YouTubeClient {
       const err = body.error || {};
       const reason = err.errors?.[0]?.reason || null;
       const msg = reason === 'quotaExceeded'
-        ? 'YouTube API daily quota exceeded. It resets at midnight Pacific Time.'
+        ? 'YouTube API daily quota exceeded (search is limited to about 100 calls a day by default; other calls share 10,000 units). It resets at midnight Pacific Time.'
         : err.message || `YouTube API error ${res.status}`;
       throw new YouTubeApiError(msg, res.status, reason);
     }
-    this.quotaUsed += cost;
+    if (endpoint === 'search') this.searchCalls += 1;
+    else this.quotaUsed += cost;
     this.cache.set(cacheKey, { body, expires: Date.now() + this.cacheTtlMs });
     if (this.cache.size > 2000) this.cache.delete(this.cache.keys().next().value);
     return body;
@@ -83,7 +87,7 @@ export class YouTubeClient {
       const r = await this.request('channels', { part: 'id', forUsername: p.value });
       if (r.items?.length) return r.items[0].id;
     }
-    const s = await this.request('search', { part: 'snippet', type: 'channel', q: p.value, maxResults: 1 }, 100);
+    const s = await this.request('search', { part: 'snippet', type: 'channel', q: p.value, maxResults: 1 });
     const id = s.items?.[0]?.id?.channelId;
     if (!id) throw new YouTubeApiError(`No channel found for "${p.value}"`, 404);
     return id;
@@ -135,7 +139,7 @@ export class YouTubeClient {
   async searchVideos(q, { max = 25, order = 'relevance', regionCode, relevanceLanguage } = {}) {
     const r = await this.request('search', {
       part: 'snippet', type: 'video', q, order, maxResults: Math.min(50, max), regionCode, relevanceLanguage,
-    }, 100);
+    });
     const ids = (r.items || []).map((i) => i.id.videoId).filter(Boolean);
     // videos.list does not promise to return items in the requested order; restore search-rank order.
     const byId = new Map((await this.getVideos(ids)).map((v) => [v.id, v]));

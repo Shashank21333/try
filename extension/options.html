@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TubeScout extension settings</title>
+  <link rel="stylesheet" href="ui.css">
+  <style>
+    main { max-width: 640px; margin: 0 auto; padding: 24px 16px 48px; }
+    h1 { font-size: 20px; margin: 0; }
+    h2 { font-size: 15px; margin: 24px 0 6px; }
+    section p, section li { color: var(--muted); }
+    section ul { padding-left: 18px; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="brand"><span class="logo" aria-hidden="true">TS</span><h1>TubeScout extension settings</h1></div>
+    <p class="muted">The extension shows data from <b>your own</b> TubeScout server on YouTube video, channel and search pages.</p>
+
+    <form id="form" class="card" autocomplete="off" novalidate>
+      <label for="server">Server URL</label>
+      <input id="server" type="url" inputmode="url" spellcheck="false" placeholder="http://localhost:3000" required>
+      <p class="hint">Where TubeScout runs (<code>npm start</code> prints it). <code>localhost</code> and <code>127.0.0.1</code> on any port work right away; any other address asks Chrome for permission to reach that host once.</p>
+
+      <label for="password">Password <span class="muted">(optional)</span></label>
+      <input id="password" type="password" spellcheck="false" autocomplete="new-password" placeholder="Only if the server has APP_PASSWORD">
+      <p class="hint">Sent to your server as HTTP Basic auth. Stored only in this browser profile (<code>chrome.storage.local</code>), never synced, and never shared with YouTube pages.</p>
+
+      <div class="row">
+        <button class="primary" type="submit" id="save">Save</button>
+        <button class="ghost" type="button" id="test">Test connection</button>
+        <span id="saved" class="muted" role="status"></span>
+      </div>
+      <div id="status" class="status" aria-live="polite"></div>
+    </form>
+
+    <section>
+      <h2>What it uses</h2>
+      <ul>
+        <li><b>Video pages</b> (<code>/watch</code>, <code>/shorts</code>): your server's <code>/api/video</code>. In live mode that costs a few YouTube Data API units per video (10,000 free units per day).</li>
+        <li><b>Channel pages</b>: <code>/api/channel</code>, about 3–4 units per channel.</li>
+        <li><b>Search results</b>: <code>/api/demand</code>, YouTube's public autocomplete (no API units). If your server has SerpAPI or Keywords Everywhere keys, the panel waits for a click because those cost credits.</li>
+        <li>Collapsed panels load nothing. Results are cached for 5 minutes per tab.</li>
+      </ul>
+      <h2>Permissions</h2>
+      <ul>
+        <li><b>storage</b>: keeps the server URL, password and the collapsed/expanded state.</li>
+        <li><b>localhost, 127.0.0.1</b>: lets the extension's background worker call a TubeScout server on this computer.</li>
+        <li><b>youtube.com</b>: shows the panel on YouTube pages. The page itself never talks to your server; only the background worker does, and only to the TubeScout endpoints it needs.</li>
+        <li><b>Other hosts</b> are optional and requested only for the server URL you save here.</li>
+      </ul>
+      <h2>Privacy</h2>
+      <p>The extension talks only to the server URL above. It sends the video ID, channel or search term of the YouTube page you are viewing, nothing else. No analytics, no third parties.</p>
+    </section>
+  </main>
+  <script src="lib.js"></script>
+  <script src="status.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>

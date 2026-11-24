@@ -37,9 +37,10 @@ export function create(ctx, overrides = {}) {
       return ai;
     }
     if (!Anthropic) throw httpError(503, SDK_MISSING_MESSAGE);
-    // The SDK resolves credentials itself: ANTHROPIC_API_KEY, or an `ant auth login` profile (AI_ENABLED=1).
+    // Credentials: ANTHROPIC_API_KEY from TubeScout's env (.env), else the SDK's own resolution
+    // (e.g. an `ant auth login` profile when AI_ENABLED=1). The key is never logged or returned.
     // A generation normally takes well under a minute; cap the wait so the UI never hangs for 10 minutes.
-    const client = new Anthropic({ timeout: 300_000, maxRetries: 2 });
+    const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY || undefined, timeout: 300_000, maxRetries: 2 });
     ai = createAI({ client, model, sdk: Anthropic });
     return ai;
   }

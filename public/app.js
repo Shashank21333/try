@@ -78,7 +78,9 @@ async function api(path, params) {
 function updateMeta(meta) {
   $('#demo-banner').hidden = meta.mode !== 'demo';
   state.meta = meta;
-  $('#quota').textContent = meta.mode === 'live' ? `API quota used by this server since start: ~${meta.quotaUsedSinceStart} units.` : '';
+  $('#quota').textContent = meta.mode === 'live'
+    ? `YouTube API used by this server since start: ~${meta.quotaUsedSinceStart} of 10,000 daily units, ${meta.searchCallsSinceStart ?? 0} of ~100 daily search calls.`
+    : '';
 }
 
 // ---------- reusable UI pieces ----------

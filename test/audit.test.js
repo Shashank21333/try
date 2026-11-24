@@ -143,7 +143,7 @@ test('a well-optimized long-form video passes every check and gets an A', () => 
   const r = scoreVideo(rawVideo(), { keyword: 'budget phone', context: { medianEngagement: 0.04 } });
   const ids = r.checks.map((c) => c.id);
   assert.deepEqual(ids, ['title-length', 'keyword-title', 'keyword-description', 'keyword-tags', 'description-length', 'chapters',
-    'tags', 'tags-limit', 'hashtags', 'links-cta', 'thumbnail-hd', 'captions', 'definition-hd', 'engagement']);
+    'tags', 'tags-limit', 'hashtags', 'hashtags-limit', 'links-cta', 'thumbnail-hd', 'captions', 'definition-hd', 'engagement']);
   for (const c of r.checks) {
     assert.equal(c.passed, true, `${c.id}: ${c.detail}`);
     assert.equal(c.points, c.maxPoints);
@@ -154,6 +154,8 @@ test('a well-optimized long-form video passes every check and gets an A', () => 
   assert.equal(r.grade, 'A');
   assert.equal(check(r, 'chapters').kind, 'rule');
   assert.equal(check(r, 'tags-limit').kind, 'rule');
+  assert.equal(check(r, 'hashtags-limit').kind, 'rule');
+  assert.equal(check(r, 'hashtags').kind, 'heuristic');
 });
 
 test('an empty video fails and gets an F, with fix hints on failures', () => {
@@ -162,6 +164,8 @@ test('an empty video fails and gets an F, with fix hints on failures', () => {
   assert.ok(r.score < 40);
   for (const c of r.checks.filter((x) => !x.passed)) assert.ok(c.fix, c.id);
   assert.equal(check(r, 'tags-limit'), undefined, 'no tag-limit check without tags');
+  assert.equal(check(r, 'hashtags-limit'), undefined, 'no hashtag-limit check without hashtags');
+  assert.match(check(r, 'description-length').fix, /250/);
   assert.equal(check(r, 'keyword-title'), undefined, 'no keyword checks without a keyword');
   assert.equal(check(r, 'engagement'), undefined, 'no engagement check without channel context');
 });
@@ -235,22 +239,31 @@ test('tags and the 500-character tag limit', () => {
 
 test('hashtag rule: more than 60 means YouTube ignores all of them', () => {
   const tags = (k) => Array.from({ length: k }, (_, i) => `#topic${i}`).join(' ');
-  const over = check(scoreVideo(rawVideo({ description: `${LONG_DESC}\n${tags(HASHTAGS_MAX + 1)}` })), 'hashtags');
-  assert.equal(over.passed, false);
-  assert.equal(over.points, 0);
-  assert.equal(over.kind, 'rule');
-  assert.match(over.detail, /ignores every hashtag/);
-  const many = check(scoreVideo(rawVideo({ description: tags(HASHTAGS_MAX) })), 'hashtags');
-  assert.equal(many.points, 3);
-  assert.equal(many.kind, 'heuristic');
-  const none = check(scoreVideo(rawVideo({ description: 'No tags here at all' })), 'hashtags');
-  assert.equal(none.points, 2);
-  assert.equal(none.kind, 'heuristic');
-  const good = check(scoreVideo(rawVideo()), 'hashtags');
-  assert.equal(good.passed, true);
-  assert.equal(good.kind, 'rule');
-  // Hashtags in the title count too
-  assert.equal(check(scoreVideo(rawVideo({ title: 'Phones #tech', description: 'plain' })), 'hashtags').passed, true);
+  const r = (description, title) => scoreVideo(rawVideo({ description, ...(title ? { title } : {}) }));
+  // 61 hashtags: the official limit fails and the heuristic gives nothing
+  const over = r(`${LONG_DESC}\n${tags(HASHTAGS_MAX + 1 - 2)}`); // LONG_DESC already has 2
+  assert.equal(check(over, 'hashtags-limit').passed, false);
+  assert.equal(check(over, 'hashtags-limit').points, 0);
+  assert.equal(check(over, 'hashtags-limit').kind, 'rule');
+  assert.match(check(over, 'hashtags-limit').detail, /61 hashtags.*ignores every hashtag/);
+  assert.equal(check(over, 'hashtags').points, 0);
+  // Exactly 60: within the official limit, but "too many" by the heuristic
+  const sixty = r(tags(HASHTAGS_MAX));
+  assert.equal(check(sixty, 'hashtags-limit').passed, true);
+  assert.equal(check(sixty, 'hashtags').points, 1);
+  assert.equal(check(sixty, 'hashtags').kind, 'heuristic');
+  assert.match(check(sixty, 'hashtags').detail, /too many/);
+  // 15 is fine, 16 is "many"
+  assert.equal(check(r(tags(15)), 'hashtags').passed, true);
+  assert.equal(check(r(tags(16)), 'hashtags').passed, false);
+  // None: heuristic partial credit, and the limit check does not apply
+  const none = r('No tags here at all');
+  assert.equal(check(none, 'hashtags').points, 1);
+  assert.equal(check(none, 'hashtags').kind, 'heuristic');
+  assert.equal(check(none, 'hashtags-limit'), undefined);
+  // Duplicates count once (case-insensitive); hashtags in the title count too
+  assert.equal(check(r('#Tech #tech #TECH'), 'hashtags').detail.startsWith('1 hashtag '), true);
+  assert.equal(check(r('plain', 'Phones #tech'), 'hashtags').passed, true);
 });
 
 test('links and call to action', () => {

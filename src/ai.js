@@ -61,6 +61,9 @@ export function mapApiError(err, sdk) {
     if (is(sdk.APIConnectionTimeoutError)) return httpError(504, 'The Anthropic API took too long to respond. Try again.');
     if (is(sdk.APIConnectionError)) return httpError(502, 'Could not reach the Anthropic API. Check your internet connection.');
     if (is(sdk.APIError)) return httpError(502, `Anthropic API error (${err.status ?? 'no status'})${err.apiMessage ? `: ${err.apiMessage}` : ''}`);
+    // Anything else was thrown by the SDK before a request went out, usually missing or
+    // unresolvable credentials (e.g. AI_ENABLED=1 without an `ant auth login` profile).
+    return httpError(500, `AI request could not be sent: ${String(err?.message || err).replace(/[.\s]*$/, '.')} Check ANTHROPIC_API_KEY in .env (or your "ant auth login" profile if you use AI_ENABLED=1), then restart TubeScout.`);
   }
   return httpError(502, `AI request failed: ${err?.message || String(err)}`);
 }
@@ -395,14 +398,17 @@ export const SCHEMAS = {
 
 const flat = (s) => ` ${String(s).toLowerCase().normalize('NFKC').replace(/[^\p{L}\p{N}]+/gu, ' ').trim()} `;
 
-/** 'phrase' when the keyword appears as a phrase, 'words' when all its meaningful words appear, else null. */
+// Naive singular form so "phones" matches "phone" (English-only heuristic; "glass"/"bus" stay as they are).
+const singular = (w) => (w.length > 3 && /[^su]s$/u.test(w) ? w.slice(0, -1) : w);
+
+/** 'phrase' when the keyword appears as a phrase, 'words' when all its meaningful words appear (plurals allowed), else null. */
 export function keywordMatch(text, keyword) {
   const k = flat(keyword).trim();
   if (!k) return null;
   if (flat(text).includes(` ${k} `)) return 'phrase';
-  const need = tokenize(keyword);
+  const need = tokenize(keyword).map(singular);
   if (!need.length) return null;
-  const have = new Set(tokenize(text));
+  const have = new Set(tokenize(text).map(singular));
   return need.every((t) => have.has(t)) ? 'words' : null;
 }
 
@@ -423,6 +429,9 @@ export function hasSubstance(title, keywordFound = false) {
   const words = tokenize(t).filter((w) => !VAGUE.has(w));
   return words.length >= 2 || (keywordFound && words.length >= 1);
 }
+
+/** Hype phrases found in a title (shown in the score breakdown; they do not change the score on their own). */
+export const hypePhrases = (title) => [...new Set(CLICKBAIT.flatMap((re) => String(title).match(re) || []).map((m) => `"${m.toLowerCase()}"`))];
 
 /** Mostly upper-case letters (ignores scripts without case). */
 export function isAllCaps(title) {
@@ -459,7 +468,7 @@ export function scoreTitle(title, { keyword = '', patterns = [] } = {}) {
       key: 'keyword',
       weight: 30,
       passed: kwFound,
-      label: m === 'phrase' ? `Contains the keyword "${keyword}"` : m === 'words' ? `Contains every word of "${keyword}"` : `Missing the keyword "${keyword}"`,
+      label: m === 'phrase' ? `Contains the keyword "${keyword}"` : m === 'words' ? `Contains every word of "${keyword}" (not as an exact phrase)` : `Missing the keyword "${keyword}"`,
     });
   }
   const winners = patterns.filter((p) => p.lift >= POSITIVE_LIFT);
@@ -477,11 +486,14 @@ export function scoreTitle(title, { keyword = '', patterns = [] } = {}) {
   const caps = isAllCaps(t);
   checks.push({ key: 'caps', weight: 10, passed: !caps, label: caps ? 'Mostly ALL CAPS (reads as shouting)' : 'Not ALL CAPS' });
   const substance = hasSubstance(t, kwFound);
+  const hype = hypePhrases(t);
   checks.push({
     key: 'substance',
     weight: 15,
     passed: substance,
-    label: substance ? 'Says what the video is about (not clickbait-only)' : 'Clickbait-only: say what the viewer will get',
+    label: !substance ? 'Clickbait-only: say what the viewer will get'
+      : hype.length ? `Says what the video is about, but leans on hype (${hype.join(', ')})`
+        : 'Says what the video is about (not clickbait-only)',
   });
   const total = checks.reduce((s, c) => s + c.weight, 0);
   const got = checks.reduce((s, c) => s + (c.passed ? c.weight : 0), 0);

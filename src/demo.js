@@ -68,6 +68,7 @@ export class DemoClient {
     this.channels = new Map(); // id -> { name, seed }
     this.videos = new Map(); // id -> generated video item (for getVideos)
     this.quotaUsed = 0;
+    this.searchCalls = 0;
   }
 
   #register(name) {

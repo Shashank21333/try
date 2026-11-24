@@ -182,3 +182,17 @@ test('service: analyze, compare and keyword research run end-to-end on demo data
   assert.ok(!k.relatedKeywords.some((r) => ['budget', 'phone', 'budget phone'].includes(r.term)), 'query words and phrase excluded');
   await assert.rejects(researchKeyword(client, '  '), /keyword/);
 });
+
+test('YouTubeClient counts search.list in its own bucket and keeps search-rank order', async () => {
+  const fetchImpl = async (url) => {
+    const u = new URL(url);
+    if (u.pathname.endsWith('/search')) return { ok: true, status: 200, json: async () => ({ items: [{ id: { videoId: 'bbbbbbbbbbb' } }, { id: { videoId: 'aaaaaaaaaaa' } }] }) };
+    // videos.list returns items in a different order than requested
+    return { ok: true, status: 200, json: async () => ({ items: [{ id: 'aaaaaaaaaaa' }, { id: 'bbbbbbbbbbb' }] }) };
+  };
+  const c = new YouTubeClient('KEY', { fetchImpl });
+  const vids = await c.searchVideos('order test');
+  assert.deepEqual(vids.map((v) => v.id), ['bbbbbbbbbbb', 'aaaaaaaaaaa']);
+  assert.equal(c.searchCalls, 1, 'one call from the search bucket');
+  assert.equal(c.quotaUsed, 1, 'only videos.list uses the 10,000-unit pool');
+});

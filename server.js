@@ -91,6 +91,7 @@ async function readJson(req) {
 const meta = () => ({
   mode: DEMO ? 'demo' : 'live',
   quotaUsedSinceStart: client.quotaUsed,
+  searchCallsSinceStart: client.searchCalls ?? 0,
   integrations: {
     trends: Boolean(env.SERPAPI_KEY),
     volume: Boolean(env.KE_API_KEY),

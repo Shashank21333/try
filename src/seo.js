@@ -22,7 +22,7 @@ export const TAGS_MAX_CHARS = 500;
 // Hashtags, https://support.google.com/youtube/answer/6390658 : "If a video or playlist has more than
 // 60 hashtags, we'll ignore each hashtag on that content." Up to three may appear by the title.
 export const HASHTAGS_MAX = 60;
-// Titles: 100 characters max (https://support.google.com/youtube/answer/57404).
+// Titles: 100 characters max; descriptions: 5,000 bytes max (videos resource docs, link above).
 export const TITLE_MAX_CHARS = 100;
 // Links in Shorts descriptions are not clickable (https://support.google.com/youtube/answer/13748639).
 
@@ -31,6 +31,7 @@ export const TITLE_MIN_CHARS = 20;
 export const TITLE_VISIBLE_CHARS = 70; // roughly what search/suggested show before truncating; varies by device
 export const DESCRIPTION_PREVIEW_CHARS = 150; // roughly what shows before "...more"
 export const DESCRIPTION_GOOD_CHARS = 250;
+export const SHORT_DESCRIPTION_GOOD_CHARS = 100;
 export const HASHTAGS_PLENTY = 15; // YouTube: "Don't add too many tags", but sets no number below 60
 
 /** Letter grade for a 0-100 score. */
@@ -199,7 +200,8 @@ export function summarize(checks) {
  * opts.context: { medianEngagement, format } of the channel's recent uploads in the same format
  *   (enables the engagement check).
  * Weights (max points): title 10, keyword in title 10, keyword early in description 8, keyword in
- * tags 3, description 10 (Shorts 6), chapters 10 (long-form only), tags 3, tag limit 3, hashtags 5,
+ * tags 3, description 10 (Shorts 6), chapters 10 (long-form only), tags 3, tag limit 3, hashtags 3,
+ * hashtag limit 3 (only with hashtags),
  * links + call to action 4 (Shorts: call to action 2), HD thumbnail 8 (long-form only),
  * captions 8 (Shorts 4), HD video 4, engagement 8.
  */
@@ -266,13 +268,13 @@ export function scoreVideo(item, { keyword = '', context = null } = {}) {
 
   // Description length (heuristic)
   const dLen = len(description.trim());
-  const dGood = isShort ? 100 : DESCRIPTION_GOOD_CHARS;
+  const dGood = isShort ? SHORT_DESCRIPTION_GOOD_CHARS : DESCRIPTION_GOOD_CHARS;
   const dMin = isShort ? 20 : 100;
   const dMax = isShort ? 6 : 10;
   add({
     id: 'description-length', label: 'Description length', kind: 'heuristic', maxPoints: dMax,
     points: dLen >= dGood ? dMax : dLen >= dMin ? dMax / 2 : 0,
-    detail: dLen ? `${dLen} characters (aim for ${dGood}+${isShort ? ' on a Short' : ''}; the limit is 5,000).` : 'The description is empty.',
+    detail: dLen ? `${dLen} characters (aim for ${dGood}+${isShort ? ' on a Short' : ''}; the hard limit is 5,000 bytes).` : 'The description is empty.',
     fix: isShort
       ? 'Add a sentence or two that names the topic in words people search for.'
       : `Write at least ${DESCRIPTION_GOOD_CHARS} characters: what the video covers, key terms, and links to related videos.`,
@@ -316,19 +318,28 @@ export function scoreVideo(item, { keyword = '', context = null } = {}) {
     });
   }
 
-  // Hashtags: >60 is an official rule (all are ignored); 0 or many is a heuristic
+  // Hashtags: using a few is a heuristic; more than 60 is an official rule (YouTube then ignores all
+  // of them). YouTube does not say whether title hashtags count toward 60; we count title + description.
   const hashtags = extractHashtags(`${title}\n${description}`);
   const hn = hashtags.length;
   add({
-    id: 'hashtags', label: 'Hashtags', kind: hn > HASHTAGS_MAX || (hn >= 1 && hn <= HASHTAGS_PLENTY) ? 'rule' : 'heuristic', maxPoints: 5,
-    points: hn > HASHTAGS_MAX ? 0 : hn === 0 ? 2 : hn > HASHTAGS_PLENTY ? 3 : 5,
-    detail: hn > HASHTAGS_MAX ? `${hn} hashtags. YouTube ignores every hashtag on a video with more than ${HASHTAGS_MAX}.`
-      : hn === 0 ? 'No hashtags. Up to three hashtags can appear by the title and link to a page of related videos.'
-        : hn > HASHTAGS_PLENTY ? `${hn} hashtags: under YouTube's limit of ${HASHTAGS_MAX}, but YouTube advises not to add too many.`
-          : `${hn} hashtag${hn === 1 ? '' : 's'} (${hashtags.slice(0, 3).map((h) => `#${h}`).join(' ')}${hn > 3 ? ' …' : ''}), within YouTube's limit of ${HASHTAGS_MAX}.`,
-    fix: hn > HASHTAGS_MAX ? `Cut hashtags to a handful of relevant ones; over ${HASHTAGS_MAX}, all are ignored.`
-      : hn === 0 ? 'Add 1–3 relevant hashtags to the description.' : 'Keep only the most relevant hashtags.',
+    id: 'hashtags', label: 'Hashtags', kind: 'heuristic', maxPoints: 3,
+    points: hn >= 1 && hn <= HASHTAGS_PLENTY ? 3 : hn <= HASHTAGS_MAX ? 1 : 0,
+    detail: hn === 0 ? 'No hashtags. Up to three can appear by the title and link to a page of related videos.'
+      : hn <= HASHTAGS_PLENTY ? `${hn} hashtag${hn === 1 ? '' : 's'} (${hashtags.slice(0, 3).map((h) => `#${h}`).join(' ')}${hn > 3 ? ' …' : ''}). Up to three can appear by the title.`
+        : `${hn} hashtags. YouTube advises against adding too many and says over-tagging can get a video removed from search (rule of thumb: ${HASHTAGS_PLENTY} or fewer).`,
+    fix: hn === 0 ? 'Add 1–3 relevant hashtags to the description.' : 'Keep only the few most relevant hashtags.',
   });
+  if (hn) {
+    add({
+      id: 'hashtags-limit', label: `No more than ${HASHTAGS_MAX} hashtags`, kind: 'rule', maxPoints: 3,
+      points: hn <= HASHTAGS_MAX ? 3 : 0,
+      detail: hn <= HASHTAGS_MAX
+        ? `${hn} hashtag${hn === 1 ? '' : 's'} in the title and description; YouTube ignores every hashtag on a video with more than ${HASHTAGS_MAX}.`
+        : `${hn} hashtags in the title and description. YouTube ignores every hashtag on a video with more than ${HASHTAGS_MAX}.`,
+      fix: `Cut the hashtags to a handful of relevant ones: above ${HASHTAGS_MAX}, YouTube ignores all of them.`,
+    });
+  }
 
   // Links and call to action (heuristic). Links in Shorts descriptions are not clickable.
   const hasLink = LINK_RE.test(description);
@@ -356,7 +367,7 @@ export function scoreVideo(item, { keyword = '', context = null } = {}) {
       detail: maxres
         ? 'A 1280×720 ("maxres") thumbnail exists. This is only a proxy: it does not prove a custom thumbnail, because only the video\'s owner can see that through the API.'
         : 'No 1280×720 ("maxres") thumbnail, so the thumbnail may look soft on large screens. This is a proxy, not proof that no custom thumbnail was set.',
-      fix: 'Upload a custom 16:9 thumbnail. YouTube recommends 3840×2160, at least 640 px wide.',
+      fix: 'Upload a custom 16:9 thumbnail (needs a verified account). YouTube recommends 3840×2160, at least 640 px wide.',
     });
   }
 
@@ -540,7 +551,7 @@ export function auditChannel(rawChannel, rawVideos, { now = Date.now(), complete
       }));
     }
     // Description quality = share of points earned on the description checks.
-    const descIds = ['description-length', 'links-cta', 'hashtags'];
+    const descIds = ['description-length', 'links-cta', 'hashtags', 'hashtags-limit'];
     const descChecks = items.flatMap((x) => x.seo.checks.filter((c) => descIds.includes(c.id)));
     const descShare = descChecks.reduce((s, c) => s + c.points, 0) / Math.max(1, descChecks.reduce((s, c) => s + c.maxPoints, 0));
     const passShare = (id) => pctStr(items.filter((x) => x.seo.checks.find((c) => c.id === id)?.passed).length / total);
@@ -549,7 +560,7 @@ export function auditChannel(rawChannel, rawVideos, { now = Date.now(), complete
       id: 'description-quality', label: 'Description quality', share: descShare, maxPoints: 8, pass: 0.75,
       detail: `${passShare('description-length')} have a full-length description, ${passShare('links-cta')} include links and a call to action (Shorts: a call to action), ${passShare('hashtags')} use 1–${HASHTAGS_PLENTY} hashtags.`,
       fix: shortDesc.length
-        ? `Expand ${shortDesc.length} thin description${shortDesc.length === 1 ? '' : 's'} (under ${DESCRIPTION_GOOD_CHARS} characters for long-form), starting with ${topTitles(shortDesc)}, and add a link plus a call to action.`
+        ? `Expand ${shortDesc.length} thin description${shortDesc.length === 1 ? '' : 's'} (under ${DESCRIPTION_GOOD_CHARS} characters for long-form, ${SHORT_DESCRIPTION_GOOD_CHARS} for Shorts), starting with ${topTitles(shortDesc)}, and add a link plus a call to action.`
         : 'Add a link, a call to action and 1–3 relevant hashtags to each description.',
     }));
   }

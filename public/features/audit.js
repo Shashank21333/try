@@ -19,6 +19,7 @@ const CSS = `
 .ac-head .meta { color: var(--muted); font-size: 13px; margin-bottom: 6px; overflow-wrap: anywhere; }
 .ac-score { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
 .ac-score > .kpis, .ac-score > .gauges { flex: 1 1 300px; }
+.ac-score > .gauges { grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); } /* 2 per row on phones */
 .ac-ring { position: relative; width: 128px; height: 128px; flex: none; }
 .ac-ring svg { width: 100%; height: 100%; transform: rotate(-90deg); display: block; }
 .ac-ring circle { fill: none; stroke-width: 9; }
